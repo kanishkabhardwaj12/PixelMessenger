@@ -89,3 +89,8 @@ typings/
 # Build directory
 build/
 dist/
+
+# --- Python ---
+/venv/
+__pycache__/
+*.pyc
