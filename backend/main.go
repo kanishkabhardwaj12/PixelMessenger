@@ -34,18 +34,39 @@ func main() {
 	// WebSocket route
 	// We call HandleConnections(hub) to *get* the handler function
 	http.Handle("/ws", middleware.JwtMiddleware(handlers.HandleConnections(hub))) // <-- 4. PASS THE HUB
+	// --- 3. Create a router and register routes ---
+	router := http.NewServeMux()
+	// Public routes
+	router.HandleFunc("/register", handlers.Register)
+	router.HandleFunc("/login", handlers.Login)
+
+	// Protected routes (all require a valid JWT)
+	// WebSocket route
+	// We call HandleConnections(hub) to *get* the handler function
+	router.Handle("/ws", middleware.JwtMiddleware(handlers.HandleConnections(hub))) // <-- 4. PASS THE HUB
 
 	// Room management routes
-	http.Handle("/rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.CreateRoom)))
-	http.Handle("/my-rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.GetUserRooms)))
-	http.Handle("/rooms/", middleware.JwtMiddleware(http.HandlerFunc(handlers.InviteToRoom))) // Catches /rooms/{id}/invite
+	router.Handle("/rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.CreateRoom)))
+	router.Handle("/my-rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.GetUserRooms)))
+	router.Handle("/rooms/", middleware.JwtMiddleware(http.HandlerFunc(handlers.InviteToRoom))) // Catches /rooms/{id}/invite
 
 	// Decode route
-	http.Handle("/decode", middleware.JwtMiddleware(http.HandlerFunc(handlers.DecodeImage)))
+	router.Handle("/decode", middleware.JwtMiddleware(http.HandlerFunc(handlers.DecodeImage)))
+
+	// Encode (custom image) route - accepts base64 image + message and broadcasts the
+	// resulting encoded PNG into the room. We pass the hub so the handler can publish.
+	router.Handle("/encode", middleware.JwtMiddleware(handlers.EncodeImage(hub)))
 
 	// --- 5. Start Server ---
-	log.Println("Secure API server started on :8080")
-	err := http.ListenAndServe(":8080", nil)
+	// Read desired port from BACKEND_PORT env var (fallback to 8082)
+	port := os.Getenv("BACKEND_PORT")
+	if port == "" {
+		port = "8082"
+	}
+	addr := ":" + port
+	log.Printf("Secure API server starting on %s", addr)
+	handler := middleware.CorsMiddleware(router)
+	err := http.ListenAndServe(addr, handler)
 	if err != nil {
 		log.Fatal("ListenAndServe: ", err)
 	}

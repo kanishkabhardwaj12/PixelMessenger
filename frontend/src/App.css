@@ -40,3 +40,38 @@
 .read-the-docs {
   color: #888;
 }
+
+/* App-specific small polish */
+.pm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.pm-title {
+  font-weight: 700;
+  color: #8b5cf6; /* indigo-500 */
+}
+.pm-connection {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.875rem;
+}
+.pm-connection.connected { background: #10b981; color: white; }
+.pm-connection.connecting { background: #f59e0b; color: white; }
+.pm-connection.disconnected { background: #ef4444; color: white; }
+
+/* Message bubbles fallback styles when Tailwind utilities aren't present */
+.msg-bubble { border-radius: 10px; padding: 0.75rem 1rem; max-width: 70%; }
+.msg-bubble.self { background: #4f46e5; color: white; margin-left: auto; }
+.msg-bubble.other { background: #1f2937; color: #e5e7eb; }
+.msg-meta { font-size: 0.75rem; color: #9ca3af; margin-top: 0.25rem; }
+
+/* Fallback centering for the auth page when Tailwind isn't available */
+.auth-wrapper { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #0f1724; color: #f8fafc; }
+.auth-box { width: 100%; max-width: 420px; padding: 2rem; background: #111827; border-radius: 12px; box-shadow: 0 10px 30px rgba(2,6,23,0.6); }
+.auth-box h2 { margin-bottom: 0.25rem; }
+.auth-box form input { width: 100%; }

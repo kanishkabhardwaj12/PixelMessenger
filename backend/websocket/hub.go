@@ -2,12 +2,17 @@ package ws
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"image"
 	"log"
+	"os"
 	"net/http"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/steganography"
+	"github.com/kanishkabhardwaj12/PixelMessenger/backend/storage"
 )
 
 // BroadcastMessage is a TEXT message from a client to the Hub.
@@ -22,6 +27,9 @@ type BroadcastMessage struct {
 type roomBroadcast struct {
 	RoomID      string
 	EncodedData []byte // This is the final encoded PNG
+	SenderID    string // user who triggered this broadcast (do not resend to them)
+	DecodedText string // The decoded message extracted from the payload
+	Timestamp   string // RFC3339 timestamp
 }
 
 type Hub struct {
@@ -41,6 +49,19 @@ func NewHub() *Hub {
 		Unregister:    make(chan *Client),
 		Rooms:         make(map[string]map[*Client]bool),
 		roomBroadcast: make(chan *roomBroadcast), // Initialize the new channel
+	}
+}
+
+// PublishEncodedImage allows external callers to submit a ready-encoded PNG
+// which the hub will broadcast into the given room. This is used by handlers
+// that accept user-uploaded images and want the hub to deliver them.
+func (h *Hub) PublishEncodedImage(roomID string, data []byte, senderID string, decodedText string) {
+	h.roomBroadcast <- &roomBroadcast{
+		RoomID:      roomID,
+		EncodedData: data,
+		SenderID:    senderID,
+		DecodedText: decodedText,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
@@ -91,7 +112,12 @@ func fetchImage(url string) (image.Image, error) {
 // processSteganography is our new "worker" function.
 // It runs in its own goroutine and does all the slow work.
 func (h *Hub) processSteganography(message *BroadcastMessage) {
-	aiServiceURL := "http://localhost:5000/select-image"
+	// Allow AI service URL to be configured via environment variable.
+	// Fallback to the local development URL if not set.
+	aiServiceURL := os.Getenv("AI_SERVICE_URL")
+	if aiServiceURL == "" {
+		aiServiceURL = "http://localhost:5000/select-image"
+	}
 
 	// 1. Get the best image URL from the AI service
 	bestImageURL := getBestImageURL(aiServiceURL)
@@ -104,16 +130,28 @@ func (h *Hub) processSteganography(message *BroadcastMessage) {
 	}
 
 	// 3. Encode the message into the image
-	encodedImageBuf, err := steganography.Encode(img, message.Message)
+	// To ensure the hidden payload is always valid UTF-8 and safe across languages,
+	// encode the message bytes as base64 ASCII before embedding and prefix with a
+	// small marker so the decoder can detect and reverse it.
+	b64msg := base64.StdEncoding.EncodeToString(message.Message)
+	payload := "B64:" + b64msg
+	encodedImageBuf, err := steganography.Encode(img, []byte(payload))
 	if err != nil {
 		log.Printf("Failed to encode steganography: %v", err)
 		return // Don't send anything if this fails
 	}
 
 	// 4. Send the FINAL encoded image back to the Hub's new channel
+	// We also include the decoded text and a timestamp so the hub can broadcast
+	// a JSON message containing both the encoded image (base64) and the decoded text.
+	decodedText := string(message.Message)
+	log.Printf("Worker: encoded image for room=%s sender=%s size=%d bytes", message.RoomID, message.UserID, encodedImageBuf.Len())
 	h.roomBroadcast <- &roomBroadcast{
 		RoomID:      message.RoomID,
 		EncodedData: encodedImageBuf.Bytes(),
+		SenderID:    message.UserID,
+		DecodedText: decodedText,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
@@ -148,10 +186,33 @@ func (h *Hub) Run() {
 			// A worker has finished encoding an image.
 			// THIS is now the new, fast broadcast logic.
 			if clients, ok := h.Rooms[imageMsg.RoomID]; ok {
+				log.Printf("Hub: broadcasting image to room=%s sender=%s connections=%d", imageMsg.RoomID, imageMsg.SenderID, len(clients))
+
+				// Try to look up a human-friendly sender name. Fall back to the
+				// raw sender id if lookup fails.
+				senderName := imageMsg.SenderID
+				if u, err := storage.GetUserByID(imageMsg.SenderID); err == nil && u != nil {
+					senderName = u.Username
+				}
+
+				// Prepare a JSON payload containing base64 image + decoded text + metadata
+				payload := map[string]interface{}{
+					"type":         "image",
+					"image_base64": base64.StdEncoding.EncodeToString(imageMsg.EncodedData),
+					"decoded_text": imageMsg.DecodedText,
+					"sender_id":    imageMsg.SenderID,
+					"sender_name":  senderName,
+					"timestamp":    imageMsg.Timestamp,
+				}
+				jsonBytes, _ := json.Marshal(payload)
+
 				for client := range clients {
+					// Send the JSON text message to every client (including sender)
 					select {
-					case client.Send <- imageMsg.EncodedData:
+					case client.Send <- &OutgoingMessage{Type: websocket.TextMessage, Data: jsonBytes}:
+						log.Printf("Hub: sent image+text to user=%s in room=%s", client.UserID, imageMsg.RoomID)
 					default:
+						log.Printf("Hub: send channel blocked for user=%s in room=%s; closing connection", client.UserID, imageMsg.RoomID)
 						close(client.Send)
 						delete(clients, client)
 					}

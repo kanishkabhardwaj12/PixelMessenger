@@ -61,6 +61,17 @@ func GetUserByUsername(username string) (*models.User, error) {
 	return &user, nil
 }
 
+// GetUserByID returns a user by their UUID id.
+func GetUserByID(id string) (*models.User, error) {
+	var user models.User
+	query := "SELECT id, username, password_hash FROM users WHERE id = $1"
+	err := DB.QueryRow(context.Background(), query, id).Scan(&user.ID, &user.Username, &user.PasswordHash)
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 // --- Room Functions ---
 
 func CreateRoom(room models.Room) error {

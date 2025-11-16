@@ -14,11 +14,17 @@ import {
   Key,
 } from 'lucide-react';
 
-// Base URL for your Go backend's HTTP API
-const API_BASE_URL = 'http://localhost:8080';
+// Base URL for your Go backend's HTTP API and WebSocket API.
+// These can be configured via Vite env vars (recommended) or fall back to localhost:8082.
+// Set in PowerShell before `npm run dev` like:
+// $env:VITE_API_BASE_URL = 'http://localhost:8082'; $env:VITE_WS_BASE_URL = 'ws://localhost:8082'; npm run dev
+const API_BASE_URL = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_API_BASE_URL
+  ? import.meta.env.VITE_API_BASE_URL
+  : 'http://localhost:8082';
 
-// Base URL for your Go backend's WebSocket API
-const WS_BASE_URL = 'ws://localhost:8080';
+const WS_BASE_URL = typeof import.meta !== 'undefined' && import.meta.env && import.meta.env.VITE_WS_BASE_URL
+  ? import.meta.env.VITE_WS_BASE_URL
+  : 'ws://localhost:8082';
 
 // --- Helper Functions ---
 
@@ -169,8 +175,8 @@ function AuthPage({ onLogin }) {
   };
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gray-900 text-gray-100">
-      <div className="w-full max-w-md p-8 space-y-8 bg-gray-800 rounded-2xl shadow-xl">
+    <div className="auth-wrapper flex items-center justify-center min-h-screen bg-gray-900 text-gray-100">
+      <div className="auth-box w-full max-w-md p-8 space-y-8 bg-gray-800 rounded-2xl shadow-xl">
         <h2 className="text-4xl font-extrabold text-center text-indigo-400">
           PixelMessenger
         </h2>
@@ -202,7 +208,7 @@ function AuthPage({ onLogin }) {
               autoComplete={isLogin ? "current-password" : "new-password"}
               required
               value={password}
-              onChange={(e) => setPassword(e.targe.value)}
+              onChange={(e) => setPassword(e.target.value)}
               className="peer relative block w-full px-4 py-3 pl-12 text-lg bg-gray-700 border border-gray-600 rounded-md placeholder-gray-400 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
               placeholder="Password"
             />
@@ -252,6 +258,8 @@ function ChatPage({ token, username, userId, onLogout }) {
   const [messages, setMessages] = useState([]);
   const [webSocket, setWebSocket] = useState(null);
   const [error, setError] = useState(null);
+  const [wsStatus, setWsStatus] = useState('disconnected'); // 'connecting' | 'connected' | 'disconnected'
+  const reconnectRef = useRef({ attempts: 0, timeoutId: null });
   
   // Fetch rooms on load
   const fetchRooms = useCallback(async () => {
@@ -277,77 +285,228 @@ function ChatPage({ token, username, userId, onLogout }) {
     // We pass the token as a query parameter because WebSockets can't send auth headers.
     // Your backend's JwtMiddleware must be modified to read this.
     const wsUrl = `${WS_BASE_URL}/ws?room=${currentRoom.id}&token=${token}`;
-    
-    const ws = new WebSocket(wsUrl);
-    setWebSocket(ws);
-    setMessages([]); // Clear messages when joining a new room
 
-    ws.onopen = () => {
-      console.log(`WebSocket connected to room: ${currentRoom.id}`);
-    };
+    let ws;
 
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-    };
+    const createSocket = () => {
+      setWsStatus('connecting');
+      ws = new WebSocket(wsUrl);
+      setWebSocket(ws);
+      setMessages([]); // Clear messages when joining a new room
 
-    ws.onerror = (err) => {
-      console.error('WebSocket error:', err);
-      setError('WebSocket connection failed. Check console.');
-    };
-
-    // This is the core magic!
-    ws.onmessage = async (event) => {
-      // The backend sends a binary image (blob)
-      if (event.data instanceof Blob) {
-        const imageBlob = event.data;
-        const imageUrl = URL.createObjectURL(imageBlob);
-        
-        try {
-          // Send the blob to the /decode endpoint
-          const response = await apiFetch('/decode', token, {
-            method: 'POST',
-            body: imageBlob,
-          });
-          
-          // The response is JSON: {"message": "..."}
-          const decodedText = response.message;
-
-          // Add a new "decoded" message to our state
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              type: 'decoded',
-              imageUrl: imageUrl,
-              text: decodedText,
-              sender: '???' // Note: The backend doesn't tell us who sent it, but we could add UserID to the broadcast
-            },
-          ]);
-        } catch (err) {
-          console.error('Failed to decode image:', err);
-          // Add the image anyway, just without the text
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: Date.now(),
-              type: 'image',
-              imageUrl: imageUrl,
-              sender: '???'
-            },
-          ]);
+      ws.onopen = () => {
+        console.log(`WebSocket connected to room: ${currentRoom.id}`);
+        setWsStatus('connected');
+        reconnectRef.current.attempts = 0;
+        if (reconnectRef.current.timeoutId) {
+          clearTimeout(reconnectRef.current.timeoutId);
+          reconnectRef.current.timeoutId = null;
         }
-      } else {
-        // This is a normal text message (e.g., "User joined")
-        // We don't have this logic, but this is where it would go
-        console.log('Received text message:', event.data);
-      }
+      };
+
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
+        setWsStatus('disconnected');
+        // Try to reconnect with exponential backoff (capped)
+        const attempts = reconnectRef.current.attempts || 0;
+        const delay = Math.min(30000, 1000 * Math.pow(2, attempts));
+        reconnectRef.current.attempts = attempts + 1;
+        reconnectRef.current.timeoutId = setTimeout(() => {
+          createSocket();
+        }, delay);
+      };
+
+      ws.onerror = (err) => {
+        console.error('WebSocket error:', err);
+        setError('WebSocket connection failed. Check console.');
+      };
+
+      // Message handler for this socket instance
+
+      ws.onmessage = async (event) => {
+        // The backend now sends a JSON text message containing both the
+        // encoded image (base64) and the decoded text. We handle both that
+        // case and the legacy Blob case.
+        if (typeof event.data === 'string') {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload && payload.type === 'image' && payload.image_base64) {
+              const imageDataUrl = `data:image/png;base64,${payload.image_base64}`;
+              const decodedText = payload.decoded_text || '';
+              setMessages((prev) => {
+                // Remove any optimistic pending message that matches this image
+                const filtered = prev.filter((m) => !(m.pending && m.imageBase64 === payload.image_base64));
+                return [
+                  ...filtered,
+                  {
+                    id: Date.now(),
+                    type: 'decoded',
+                    imageUrl: imageDataUrl,
+                    imageBase64: payload.image_base64,
+                    text: decodedText,
+                    // Prefer a human-friendly sender name if provided by the backend
+                    sender: payload.sender_name || payload.sender_id || 'Unknown',
+                    timestamp: payload.timestamp || new Date().toISOString(),
+                    pending: false,
+                  },
+                ];
+              });
+              return;
+            }
+          } catch (e) {
+            // Not JSON or unexpected format — fall back to treating it as a simple text message
+            const payloadText = event.data;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                type: 'other',
+                text: payloadText,
+                sender: 'system',
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+            return;
+          }
+        }
+
+        // Legacy: binary Blob handling (if backend sends raw binary frames)
+        if (event.data instanceof Blob) {
+          const imageBlob = event.data;
+
+          // Convert blob to a data URL so it can be persisted across refreshes
+          const blobToDataUrl = (b) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('Failed to read blob'));
+            reader.onload = () => resolve(reader.result);
+            reader.readAsDataURL(b);
+          });
+
+          let imageDataUrl;
+          try {
+            imageDataUrl = await blobToDataUrl(imageBlob);
+          } catch (e) {
+            console.error('Failed to convert blob to data URL', e);
+            imageDataUrl = null;
+          }
+
+          try {
+            // Send the blob to the /decode endpoint
+            const response = await apiFetch('/decode', token, {
+              method: 'POST',
+              body: imageBlob,
+            });
+
+            let decodedText = '';
+            if (response && response.encoding === 'utf8' && typeof response.message === 'string') {
+              decodedText = response.message;
+            } else if (response && response.encoding === 'base64' && typeof response.message_base64 === 'string') {
+              try {
+                const binStr = atob(response.message_base64);
+                const len = binStr.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+                const decoded = new TextDecoder().decode(bytes);
+                decodedText = decoded || `[binary message: ${response.message_base64}]`;
+              } catch (e) {
+                decodedText = `[binary message: ${response.message_base64}]`;
+              }
+            } else if (response && typeof response.message === 'string') {
+              decodedText = response.message;
+            }
+
+            // Add a new "decoded" message to our state
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                type: 'decoded',
+                imageUrl: imageDataUrl || '',
+                text: decodedText,
+                sender: '???', // backend doesn't provide sender in this path
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+          } catch (err) {
+            console.error('Failed to decode image:', err);
+            // Add the image anyway, just without the text
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                type: 'image',
+                imageUrl: imageDataUrl || '',
+                sender: '???',
+                timestamp: new Date().toISOString(),
+              },
+            ]);
+          }
+        }
+      };
     };
+
+    createSocket();
+
+    
 
     // Cleanup function
     return () => {
-      ws.close();
+      try {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+      } finally {
+        if (reconnectRef.current.timeoutId) clearTimeout(reconnectRef.current.timeoutId);
+        reconnectRef.current.attempts = 0;
+      }
     };
   }, [currentRoom, token]);
+
+  // Persist messages per-room in localStorage so refreshes don't lose chat history.
+  const storageKeyFor = (roomId) => `pm_room_${roomId}_messages`;
+
+  // Load cached messages when joining a room
+  useEffect(() => {
+    if (!currentRoom) {
+      setMessages([]);
+      return;
+    }
+    try {
+      const key = storageKeyFor(currentRoom.id);
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          // Sanitize old object URLs (blob:) which are not valid after a refresh.
+          const sanitized = parsed.map((m) => {
+            try {
+              if (m && m.imageUrl && typeof m.imageUrl === 'string' && m.imageUrl.startsWith('blob:')) {
+                return { ...m, imageUrl: '' };
+              }
+            } catch (e) {
+              // ignore
+            }
+            return m;
+          });
+          setMessages(sanitized);
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load cached messages', e);
+    }
+    // If nothing cached, start with empty messages and rely on live events
+    setMessages([]);
+  }, [currentRoom]);
+
+  // Save messages to localStorage whenever they change
+  useEffect(() => {
+    if (!currentRoom) return;
+    try {
+      const key = storageKeyFor(currentRoom.id);
+      localStorage.setItem(key, JSON.stringify(messages));
+    } catch (e) {
+      console.warn('Failed to save cached messages', e);
+    }
+  }, [messages, currentRoom]);
 
   const handleCreateRoom = async (roomName) => {
     try {
@@ -382,19 +541,10 @@ function ChatPage({ token, username, userId, onLogout }) {
     if (webSocket && webSocket.readyState === WebSocket.OPEN) {
       // Send the raw text. The backend will handle encoding.
       webSocket.send(text);
-      
-      // Add a "pending" or "self" message
-      // Note: The backend doesn't send the message back to the sender
-      // To show our own message, we must add it manually
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: Date.now(),
-          type: 'self',
-          text: text,
-          sender: username,
-        },
-      ]);
+      // Do not add a plain-text 'self' message here. The backend now broadcasts
+      // the encoded image (and the sender will receive it too). We rely on the
+      // incoming WebSocket message to render the encoded image + decoded text
+      // so the sender and receivers see the exact same thing.
       
     } else {
       setError('WebSocket is not connected.');
@@ -412,13 +562,15 @@ function ChatPage({ token, username, userId, onLogout }) {
         onCreateRoom={handleCreateRoom}
         onInvite={handleInvite}
         onLogout={onLogout}
+        wsStatus={wsStatus}
+        setMessages={setMessages}
       />
       
       {/* Main Chat Area */}
       <div className="flex flex-col flex-1">
         {currentRoom ? (
           <>
-            <MessageArea messages={messages} />
+            <MessageArea messages={messages} username={username} />
             <MessageInput onSend={handleSendMessage} />
           </>
         ) : (
@@ -438,7 +590,7 @@ function ChatPage({ token, username, userId, onLogout }) {
 
 // --- Chat Sub-Components ---
 
-function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, onInvite, onLogout }) {
+function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, onInvite, onLogout, wsStatus, setMessages }) {
   const [newRoomName, setNewRoomName] = useState('');
   const [inviteUsername, setInviteUsername] = useState('');
 
@@ -460,11 +612,25 @@ function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, on
 
   return (
     <div className="w-80 flex-shrink-0 bg-gray-800 flex flex-col p-4 border-r border-gray-700">
+      {/* Header: app title + connection status */}
+      <div className="pm-header p-2 mb-3">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-full bg-indigo-500 flex items-center justify-center font-bold text-xl">PM</div>
+          <div>
+            <div className="pm-title">PixelMessenger</div>
+            <div className="text-xs text-gray-400">Secure image-based chat</div>
+          </div>
+        </div>
+        <div>
+          <span className={`pm-connection ${wsStatus || 'disconnected'}`}>{wsStatus}</span>
+        </div>
+      </div>
+
       {/* User Info */}
       <div className="flex items-center justify-between p-2 mb-4">
         <div className="flex items-center">
           <div className="w-10 h-10 rounded-full bg-indigo-500 flex items-center justify-center font-bold text-xl">
-            {username[0].toUpperCase()}
+            {(username && username.length > 0) ? username[0].toUpperCase() : '?'}
           </div>
           <span className="ml-3 font-semibold text-lg">{username}</span>
         </div>
@@ -522,11 +688,99 @@ function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, on
           </div>
         </form>
       )}
+
+      {/* Custom Image Encode */}
+      {currentRoom && (
+        <div className="mt-4 p-4 bg-gray-700 rounded-lg">
+          <h3 className="text-sm font-semibold mb-2">Send custom image with secret</h3>
+          <CustomImageForm currentRoom={currentRoom} token={localStorage.getItem('pixel-token')} username={username} setMessages={setMessages} />
+        </div>
+      )}
     </div>
   );
 }
 
-function MessageArea({ messages }) {
+function CustomImageForm({ currentRoom, token, username, setMessages }) {
+  const [file, setFile] = useState(null);
+  const [message, setMessage] = useState('');
+  const [isSending, setIsSending] = useState(false);
+  const [error, setError] = useState(null);
+
+  const onFileChange = (e) => {
+    setFile(e.target.files && e.target.files[0]);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    if (!file || !message.trim()) {
+      setError('Please select a file and enter a secret message');
+      return;
+    }
+    setIsSending(true);
+    try {
+      // Send multipart/form-data directly to /encode
+      const form = new FormData();
+      form.append('image', file);
+      form.append('message', message.trim());
+      form.append('room_id', currentRoom.id);
+
+      const resp = await fetch(`${API_BASE_URL}/encode`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: form,
+      });
+
+      if (!resp.ok) {
+        const txt = await resp.text();
+        throw new Error(txt || 'Failed to upload');
+      }
+
+      const data = await resp.json();
+
+      // Optimistic UI: show the encoded image returned by the server immediately
+      if (data && data.encoded_image) {
+        const encoded = data.encoded_image;
+        const dataUrl = `data:image/png;base64,${encoded}`;
+        const pendingMessage = {
+          id: 'pending-' + Date.now(),
+          type: 'decoded',
+          imageUrl: dataUrl,
+          imageBase64: encoded,
+          text: data.decoded_message || message.trim(),
+          sender: username || 'You',
+          timestamp: new Date().toISOString(),
+          pending: true,
+        };
+        setMessages((prev) => [...prev, pendingMessage]);
+      }
+
+      // Clear form
+      setMessage('');
+      setFile(null);
+      const input = document.getElementById('custom-image-input');
+      if (input) input.value = '';
+    } catch (err) {
+      console.error(err);
+      setError(err.message || 'Failed to send');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-2">
+      <input id="custom-image-input" type="file" accept="image/*" onChange={onFileChange} />
+      <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Secret message" className="w-full px-2 py-1 bg-gray-600 rounded" />
+      {error && <div className="text-xs text-red-400">{error}</div>}
+      <div className="flex">
+        <button type="submit" disabled={isSending} className="flex-1 p-2 bg-indigo-600 rounded hover:bg-indigo-700">{isSending ? 'Sending...' : 'Send with image'}</button>
+      </div>
+    </form>
+  );
+}
+
+function MessageArea({ messages, username }) {
   const messagesEndRef = useRef(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -537,36 +791,46 @@ function MessageArea({ messages }) {
   const renderMessage = (msg) => {
     switch (msg.type) {
       case 'decoded':
-        return (
-          <div className="p-3 bg-gray-700 rounded-lg max-w-lg">
-            <img
-              src={msg.imageUrl}
-              alt="Hidden message"
-              className="max-w-xs rounded-md mb-2 cursor-pointer"
-              onClick={() => window.open(msg.imageUrl, '_blank')}
-            />
-            <p className="text-lg">{msg.text}</p>
-            <span className="text-xs text-gray-400">Decoded from image</span>
-          </div>
-        );
+        {
+          const displaySender = msg.sender ? (msg.sender === username ? 'You' : msg.sender) : 'Unknown';
+          return (
+            <div className="msg-bubble other p-3 rounded-lg max-w-lg">
+              <img
+                src={msg.imageUrl}
+                alt="Hidden message"
+                className="max-w-xs rounded-md mb-2 cursor-pointer"
+                onClick={() => window.open(msg.imageUrl, '_blank')}
+              />
+              <p className="text-lg">{msg.text}  • Decoded from image • </p>
+              <div className="msg-meta">{displaySender} {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
+            </div>
+          );
+        }
       case 'image':
         // Fallback if decode failed
         return (
-          <div className="p-3 bg-gray-700 rounded-lg max-w-lg">
+          <div className="msg-bubble other p-3 rounded-lg max-w-lg">
             <img
               src={msg.imageUrl}
               alt="Received"
               className="max-w-xs rounded-md mb-2"
             />
-            <span className="text-xs text-gray-400 italic">Could not decode message</span>
+            <div className="msg-meta">Could not decode message • {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
           </div>
         );
       case 'self':
         // This is a message we just sent
         return (
-          <div className="p-3 bg-indigo-600 rounded-lg max-w-lg self-end">
+          <div className="msg-bubble self p-3 rounded-lg max-w-lg self-end ml-auto text-right">
             <p className="text-lg">{msg.text}</p>
-            <span className_Name="text-xs text-indigo-100">You (Sent)</span>
+            <div className="msg-meta">You • {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
+          </div>
+        );
+      case 'other':
+        return (
+          <div className="msg-bubble other p-2 rounded-lg max-w-lg">
+            <p className="text-md">{msg.text}</p>
+            <div className="msg-meta">{msg.sender} • {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
           </div>
         );
       default:

@@ -68,12 +68,20 @@ func HandleConnections(hub *ws.Hub) http.HandlerFunc {
 
 		// --- 5. Create and Register Client ---
 		// Use the 'ws' alias for our internal Client type
+		// Attempt to load the username for this user id so the hub can include
+		// a human-friendly sender name in broadcasts.
+		var username string
+		if u, err := storage.GetUserByID(userID); err == nil && u != nil {
+			username = u.Username
+		}
+
 		client := &ws.Client{
-			Hub:    hub,
-			Conn:   conn, // This is a *websocket.Conn from gorilla, which is correct
-			Send:   make(chan []byte, 256),
-			RoomID: roomID,
-			UserID: userID,
+			Hub:      hub,
+			Conn:     conn, // This is a *websocket.Conn from gorilla, which is correct
+			Send:     make(chan *ws.OutgoingMessage, 256),
+			RoomID:   roomID,
+			UserID:   userID,
+			Username: username,
 		}
 		client.Hub.Register <- client
 

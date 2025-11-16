@@ -90,7 +90,71 @@ typings/
 build/
 dist/
 
+# Frontend-specific (explicit)
+/frontend/node_modules/
+/frontend/dist/
+/frontend/build/
+/.vite/
+.vite/
+.parcel-cache/
+
+# Vite dev server local files
+/.vite
+.vite
+
 # --- Python ---
-/venv/
+# Virtual environments (ignore common names anywhere in the repo)
+venv/
+.venv/
+env/
+ENV/
+venv/*
+**/venv/
+**/.venv/
+
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+sdist/
+var/
+*.egg-info/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
