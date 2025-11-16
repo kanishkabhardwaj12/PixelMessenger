@@ -26,6 +26,64 @@ const WS_BASE_URL = typeof import.meta !== 'undefined' && import.meta.env && imp
   ? import.meta.env.VITE_WS_BASE_URL
   : 'ws://localhost:8082';
 
+// --- IndexedDB helper (minimal) ---
+// Stores full image blobs under auto-generated keys like 'img_<timestamp>_<rand>'.
+const IDB_DB_NAME = 'pm_images_db';
+const IDB_STORE_NAME = 'images';
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE_NAME)) {
+        db.createObjectStore(IDB_STORE_NAME, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveImageBlob(blob) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_NAME, 'readwrite');
+    const store = tx.objectStore(IDB_STORE_NAME);
+    const id = `img_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+    const entry = { id, blob };
+    const req = store.add(entry);
+    req.onsuccess = () => resolve(id);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getImageBlob(id) {
+  if (!id) return null;
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE_NAME, 'readonly');
+    const store = tx.objectStore(IDB_STORE_NAME);
+    const req = store.get(id);
+    req.onsuccess = () => {
+      const res = req.result;
+      resolve(res ? res.blob : null);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// Convert base64 (string) -> Blob
+function base64ToBlob(b64, contentType = 'image/png') {
+  const byteCharacters = atob(b64);
+  const byteNumbers = new Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  }
+  const byteArray = new Uint8Array(byteNumbers);
+  return new Blob([byteArray], { type: contentType });
+}
+
 // --- Helper Functions ---
 
 /**
@@ -258,6 +316,7 @@ function ChatPage({ token, username, userId, onLogout }) {
   const [messages, setMessages] = useState([]);
   const [webSocket, setWebSocket] = useState(null);
   const [error, setError] = useState(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [wsStatus, setWsStatus] = useState('disconnected'); // 'connecting' | 'connected' | 'disconnected'
   const reconnectRef = useRef({ attempts: 0, timeoutId: null });
   
@@ -331,26 +390,35 @@ function ChatPage({ token, username, userId, onLogout }) {
           try {
             const payload = JSON.parse(event.data);
             if (payload && payload.type === 'image' && payload.image_base64) {
-              const imageDataUrl = `data:image/png;base64,${payload.image_base64}`;
-              const decodedText = payload.decoded_text || '';
-              setMessages((prev) => {
-                // Remove any optimistic pending message that matches this image
-                const filtered = prev.filter((m) => !(m.pending && m.imageBase64 === payload.image_base64));
-                return [
-                  ...filtered,
-                  {
-                    id: Date.now(),
-                    type: 'decoded',
-                    imageUrl: imageDataUrl,
-                    imageBase64: payload.image_base64,
-                    text: decodedText,
-                    // Prefer a human-friendly sender name if provided by the backend
-                    sender: payload.sender_name || payload.sender_id || 'Unknown',
-                    timestamp: payload.timestamp || new Date().toISOString(),
-                    pending: false,
-                  },
-                ];
-              });
+              // Convert base64 -> Blob, persist in IndexedDB, and display object URL
+              (async () => {
+                try {
+                  const b64 = payload.image_base64;
+                  const blob = base64ToBlob(b64, 'image/png');
+                  const imageId = await saveImageBlob(blob).catch(() => null);
+                  const objectUrl = blob ? URL.createObjectURL(blob) : null;
+                  const decodedText = payload.decoded_text || '';
+                  setMessages((prev) => {
+                    // Remove any optimistic pending message that matches this image (match by base64 if present)
+                    const filtered = prev.filter((m) => !(m.pending && m.imageBase64 === b64));
+                    return [
+                      ...filtered,
+                      {
+                        id: Date.now(),
+                        type: 'decoded',
+                        imageUrl: objectUrl,
+                        imageId: imageId || null,
+                        text: decodedText,
+                        sender: payload.sender_name || payload.sender_id || 'Unknown',
+                        timestamp: payload.timestamp || new Date().toISOString(),
+                        pending: false,
+                      },
+                    ];
+                  });
+                } catch (e) {
+                  console.error('Failed to process incoming base64 image', e);
+                }
+              })();
               return;
             }
           } catch (e) {
@@ -374,73 +442,68 @@ function ChatPage({ token, username, userId, onLogout }) {
         if (event.data instanceof Blob) {
           const imageBlob = event.data;
 
-          // Convert blob to a data URL so it can be persisted across refreshes
-          const blobToDataUrl = (b) => new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(new Error('Failed to read blob'));
-            reader.onload = () => resolve(reader.result);
-            reader.readAsDataURL(b);
-          });
-
-          let imageDataUrl;
-          try {
-            imageDataUrl = await blobToDataUrl(imageBlob);
-          } catch (e) {
-            console.error('Failed to convert blob to data URL', e);
-            imageDataUrl = null;
-          }
-
-          try {
-            // Send the blob to the /decode endpoint
-            const response = await apiFetch('/decode', token, {
-              method: 'POST',
-              body: imageBlob,
-            });
-
-            let decodedText = '';
-            if (response && response.encoding === 'utf8' && typeof response.message === 'string') {
-              decodedText = response.message;
-            } else if (response && response.encoding === 'base64' && typeof response.message_base64 === 'string') {
-              try {
-                const binStr = atob(response.message_base64);
-                const len = binStr.length;
-                const bytes = new Uint8Array(len);
-                for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
-                const decoded = new TextDecoder().decode(bytes);
-                decodedText = decoded || `[binary message: ${response.message_base64}]`;
-              } catch (e) {
-                decodedText = `[binary message: ${response.message_base64}]`;
-              }
-            } else if (response && typeof response.message === 'string') {
-              decodedText = response.message;
+          // Persist blob in IndexedDB and decode via API
+          (async () => {
+            let objectUrl = null;
+            let imageId = null;
+            try {
+              imageId = await saveImageBlob(imageBlob).catch(() => null);
+              objectUrl = imageBlob ? URL.createObjectURL(imageBlob) : null;
+            } catch (e) {
+              console.warn('Failed to save incoming blob to IDB', e);
             }
 
-            // Add a new "decoded" message to our state
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: Date.now(),
-                type: 'decoded',
-                imageUrl: imageDataUrl || '',
-                text: decodedText,
-                sender: '???', // backend doesn't provide sender in this path
-                timestamp: new Date().toISOString(),
-              },
-            ]);
-          } catch (err) {
-            console.error('Failed to decode image:', err);
-            // Add the image anyway, just without the text
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: Date.now(),
-                type: 'image',
-                imageUrl: imageDataUrl || '',
-                sender: '???',
-                timestamp: new Date().toISOString(),
-              },
-            ]);
-          }
+            try {
+              const response = await apiFetch('/decode', token, {
+                method: 'POST',
+                body: imageBlob,
+              });
+
+              let decodedText = '';
+              if (response && response.encoding === 'utf8' && typeof response.message === 'string') {
+                decodedText = response.message;
+              } else if (response && response.encoding === 'base64' && typeof response.message_base64 === 'string') {
+                try {
+                  const binStr = atob(response.message_base64);
+                  const len = binStr.length;
+                  const bytes = new Uint8Array(len);
+                  for (let i = 0; i < len; i++) bytes[i] = binStr.charCodeAt(i);
+                  const decoded = new TextDecoder().decode(bytes);
+                  decodedText = decoded || `[binary message: ${response.message_base64}]`;
+                } catch (e) {
+                  decodedText = `[binary message: ${response.message_base64}]`;
+                }
+              } else if (response && typeof response.message === 'string') {
+                decodedText = response.message;
+              }
+
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: Date.now(),
+                  type: 'decoded',
+                  imageUrl: objectUrl || null,
+                  imageId: imageId || null,
+                  text: decodedText,
+                  sender: '???',
+                  timestamp: new Date().toISOString(),
+                },
+              ]);
+            } catch (err) {
+              console.error('Failed to decode image:', err);
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: Date.now(),
+                  type: 'image',
+                  imageUrl: objectUrl || null,
+                  imageId: imageId || null,
+                  sender: '???',
+                  timestamp: new Date().toISOString(),
+                },
+              ]);
+            }
+          })();
         }
       };
     };
@@ -475,18 +538,39 @@ function ChatPage({ token, username, userId, onLogout }) {
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
-          // Sanitize old object URLs (blob:) which are not valid after a refresh.
-          const sanitized = parsed.map((m) => {
+          // If messages include imageId entries, resolve them from IndexedDB
+          (async () => {
             try {
-              if (m && m.imageUrl && typeof m.imageUrl === 'string' && m.imageUrl.startsWith('blob:')) {
-                return { ...m, imageUrl: '' };
+              const resolved = [];
+              for (const m of parsed) {
+                const copy = { ...m };
+                // If there's an imageId, load the blob and create an object URL
+                if (copy.imageId) {
+                  try {
+                    const blob = await getImageBlob(copy.imageId).catch(() => null);
+                    if (blob) {
+                      copy.imageUrl = URL.createObjectURL(blob);
+                    } else if (copy.imageUrl && typeof copy.imageUrl === 'string') {
+                      // leave thumbnail if present
+                    } else {
+                      copy.imageUrl = null;
+                    }
+                  } catch (e) {
+                    copy.imageUrl = copy.imageUrl || null;
+                  }
+                }
+                // Normalize blob: urls (older cache)
+                if (copy && copy.imageUrl && typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:')) {
+                  copy.imageUrl = null;
+                }
+                resolved.push(copy);
               }
+              setMessages(resolved);
             } catch (e) {
-              // ignore
+              console.warn('Failed to resolve cached images', e);
+              setMessages(parsed);
             }
-            return m;
-          });
-          setMessages(sanitized);
+          })();
           return;
         }
       }
@@ -502,11 +586,79 @@ function ChatPage({ token, username, userId, onLogout }) {
     if (!currentRoom) return;
     try {
       const key = storageKeyFor(currentRoom.id);
-      localStorage.setItem(key, JSON.stringify(messages));
+      // We'll asynchronously create small thumbnails for large data URLs
+      // to avoid hitting localStorage quota while keeping a representative image.
+      (async () => {
+        const sanitized = [];
+        for (const m of messages) {
+          try {
+            const copy = { ...m };
+            if (copy.imageBase64) delete copy.imageBase64;
+
+            // If we already persisted the full image in IndexedDB, keep only the imageId
+            if (copy.imageId) {
+              // Remove transient object URLs before persisting
+              if (copy.imageUrl && typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:')) {
+                delete copy.imageUrl;
+              }
+            } else {
+              // If imageUrl is a large data URL, attempt to make a small thumbnail
+              if (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('data:') && copy.imageUrl.length > 100000) {
+                const thumb = await createThumbnail(copy.imageUrl, 200);
+                copy.imageUrl = thumb || null;
+              }
+              // Normalize object URLs and empty strings to null to avoid rendering issues
+              if (copy.imageUrl === '' || (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:'))) copy.imageUrl = null;
+            }
+
+            sanitized.push(copy);
+          } catch (e) {
+            // skip problematic entries
+          }
+        }
+
+        try {
+          localStorage.setItem(key, JSON.stringify(sanitized));
+        } catch (e) {
+          console.warn('Failed to save cached messages', e);
+        }
+      })();
     } catch (e) {
       console.warn('Failed to save cached messages', e);
     }
   }, [messages, currentRoom]);
+
+
+  // Helper: create a small PNG thumbnail (data URL) from a large data URL image.
+  // Returns data URL string or null on failure.
+  const createThumbnail = (dataUrl, maxWidth = 200) => {
+    return new Promise((resolve) => {
+      try {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const ratio = img.width / img.height || 1;
+            const w = Math.min(maxWidth, img.width || maxWidth);
+            const h = Math.max(1, Math.round(w / ratio));
+            const canvas = document.createElement('canvas');
+            canvas.width = w;
+            canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            // Use PNG for compatibility; smaller dims keep size low.
+            const thumb = canvas.toDataURL('image/png');
+            resolve(thumb);
+          } catch (e) {
+            resolve(null);
+          }
+        };
+        img.onerror = () => resolve(null);
+        img.src = dataUrl;
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  };
 
   const handleCreateRoom = async (roomName) => {
     try {
@@ -566,21 +718,51 @@ function ChatPage({ token, username, userId, onLogout }) {
         setMessages={setMessages}
       />
       
-      {/* Main Chat Area */}
-      <div className="flex flex-col flex-1">
-        {currentRoom ? (
-          <>
-            <MessageArea messages={messages} username={username} />
-            <MessageInput onSend={handleSendMessage} />
-          </>
-        ) : (
-          <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
-            <MessageSquare className="h-24 w-24" />
-            <p className="text-xl mt-4">Select a room to start chatting</p>
-            <p className="text-lg">or create a new room in the sidebar.</p>
-          </div>
-        )}
+      {/* Main Chat Area + Right Panel */}
+      <div className="flex flex-1">
+        <div className="flex flex-col flex-1">
+          {currentRoom ? (
+            <>
+              <MessageArea messages={messages} username={username} />
+              <MessageInput onSend={handleSendMessage} />
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
+              <MessageSquare className="h-24 w-27" />
+              <p className="text-xl mt-4">Select a room to start chatting</p>
+              <p className="text-lg">or create a new room in the sidebar.</p>
+            </div>
+          )}
+        </div>
+
+        {/* Right-side panel removed in favor of a collapsible drawer (toggle below) */}
       </div>
+
+      {/* Floating toggle + collapsible right drawer for the CustomImageForm */}
+      {/* Overlay (click to close) */}
+      <div className={`${drawerOpen ? 'fixed inset-0 bg-black bg-opacity-40 z-40' : 'hidden'}`} onClick={() => setDrawerOpen(false)} />
+
+      {/* Drawer */}
+      <div className={`fixed right-0 top-0 h-full w-80 bg-gray-900 shadow-xl transform transition-transform duration-300 z-50 ${drawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="flex items-center justify-between p-4 border-b border-gray-800">
+          <div className="text-sm font-semibold text-gray-100">Send custom image</div>
+          <button onClick={() => setDrawerOpen(false)} className="p-2 rounded hover:bg-gray-800">
+            <X className="h-5 w-5 text-gray-200" />
+          </button>
+        </div>
+        <div className="p-4 overflow-y-auto h-[calc(100%-64px)]">
+          {currentRoom ? (
+            <CustomImageForm currentRoom={currentRoom} token={token} username={username} setMessages={setMessages} />
+          ) : (
+            <div className="text-sm text-gray-400">Select a room to use the encoder</div>
+          )}
+        </div>
+      </div>
+
+      {/* Floating toggle button */}
+      <button onClick={() => setDrawerOpen(true)} title="Open image encoder" className="fixed right-6 bottom-24 z-50 p-3 bg-indigo-600 rounded-full shadow-lg hover:bg-indigo-700">
+        <ImageIcon className="h-5 w-5 text-white" />
+      </button>
 
       {/* Error Modal */}
       {error && <ErrorModal error={error} onClose={() => setError(null)} />}
@@ -689,13 +871,7 @@ function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, on
         </form>
       )}
 
-      {/* Custom Image Encode */}
-      {currentRoom && (
-        <div className="mt-4 p-4 bg-gray-700 rounded-lg">
-          <h3 className="text-sm font-semibold mb-2">Send custom image with secret</h3>
-          <CustomImageForm currentRoom={currentRoom} token={localStorage.getItem('pixel-token')} username={username} setMessages={setMessages} />
-        </div>
-      )}
+      
     </div>
   );
 }
@@ -703,6 +879,7 @@ function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, on
 function CustomImageForm({ currentRoom, token, username, setMessages }) {
   const [file, setFile] = useState(null);
   const [message, setMessage] = useState('');
+  const [passphrase, setPassphrase] = useState('');
   const [isSending, setIsSending] = useState(false);
   const [error, setError] = useState(null);
 
@@ -722,6 +899,9 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
       // Send multipart/form-data directly to /encode
       const form = new FormData();
       form.append('image', file);
+      if (passphrase && passphrase.trim() !== '') {
+        form.append('passphrase', passphrase.trim());
+      }
       form.append('message', message.trim());
       form.append('room_id', currentRoom.id);
 
@@ -741,22 +921,42 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
       // Optimistic UI: show the encoded image returned by the server immediately
       if (data && data.encoded_image) {
         const encoded = data.encoded_image;
-        const dataUrl = `data:image/png;base64,${encoded}`;
-        const pendingMessage = {
-          id: 'pending-' + Date.now(),
-          type: 'decoded',
-          imageUrl: dataUrl,
-          imageBase64: encoded,
-          text: data.decoded_message || message.trim(),
-          sender: username || 'You',
-          timestamp: new Date().toISOString(),
-          pending: true,
-        };
-        setMessages((prev) => [...prev, pendingMessage]);
+        // Convert base64 to blob and persist in IndexedDB so the full image
+        // is available after refresh; display object URL immediately.
+        try {
+          const blob = base64ToBlob(encoded, 'image/png');
+          const imageId = await saveImageBlob(blob).catch(() => null);
+          const objectUrl = blob ? URL.createObjectURL(blob) : null;
+          const pendingMessage = {
+            id: 'pending-' + Date.now(),
+            type: 'decoded',
+            imageUrl: objectUrl,
+            imageId: imageId || null,
+            text: data.decoded_message || message.trim(),
+            sender: username || 'You',
+            timestamp: new Date().toISOString(),
+            pending: true,
+          };
+          setMessages((prev) => [...prev, pendingMessage]);
+        } catch (e) {
+          // fallback to inline data URL if something goes wrong
+          const dataUrl = `data:image/png;base64,${encoded}`;
+          const pendingMessage = {
+            id: 'pending-' + Date.now(),
+            type: 'decoded',
+            imageUrl: dataUrl,
+            text: data.decoded_message || message.trim(),
+            sender: username || 'You',
+            timestamp: new Date().toISOString(),
+            pending: true,
+          };
+          setMessages((prev) => [...prev, pendingMessage]);
+        }
       }
 
       // Clear form
       setMessage('');
+  setPassphrase('');
       setFile(null);
       const input = document.getElementById('custom-image-input');
       if (input) input.value = '';
@@ -771,6 +971,10 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
       <input id="custom-image-input" type="file" accept="image/*" onChange={onFileChange} />
+      <div className="flex items-center gap-2">
+        <Key className="h-4 w-4 text-gray-400" />
+        <input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="Optional passphrase (for keyed embedding)" className="flex-1 px-2 py-1 bg-gray-600 rounded" />
+      </div>
       <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder="Secret message" className="w-full px-2 py-1 bg-gray-600 rounded" />
       {error && <div className="text-xs text-red-400">{error}</div>}
       <div className="flex">
@@ -795,12 +999,14 @@ function MessageArea({ messages, username }) {
           const displaySender = msg.sender ? (msg.sender === username ? 'You' : msg.sender) : 'Unknown';
           return (
             <div className="msg-bubble other p-3 rounded-lg max-w-lg">
-              <img
-                src={msg.imageUrl}
-                alt="Hidden message"
-                className="max-w-xs rounded-md mb-2 cursor-pointer"
-                onClick={() => window.open(msg.imageUrl, '_blank')}
-              />
+                  {msg.imageUrl ? (
+                    <img
+                      src={msg.imageUrl}
+                      alt="Hidden message"
+                      className="max-w-xs rounded-md mb-2 cursor-pointer"
+                      onClick={() => window.open(msg.imageUrl, '_blank')}
+                    />
+                  ) : null}
               <p className="text-lg">{msg.text}  • Decoded from image • </p>
               <div className="msg-meta">{displaySender} {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
             </div>
@@ -810,11 +1016,13 @@ function MessageArea({ messages, username }) {
         // Fallback if decode failed
         return (
           <div className="msg-bubble other p-3 rounded-lg max-w-lg">
-            <img
-              src={msg.imageUrl}
-              alt="Received"
-              className="max-w-xs rounded-md mb-2"
-            />
+            {msg.imageUrl ? (
+              <img
+                src={msg.imageUrl}
+                alt="Received"
+                className="max-w-xs rounded-md mb-2"
+              />
+            ) : null}
             <div className="msg-meta">Could not decode message • {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
           </div>
         );
@@ -865,7 +1073,7 @@ function MessageInput({ onSend }) {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="p-4 bg-gray-800 border-t border-gray-700">
+    <form id="message-input" onSubmit={handleSubmit} className="p-4 bg-gray-800 border-t border-gray-700">
       <div className="flex items-center bg-gray-700 rounded-lg">
         <input
           type="text"

@@ -19,6 +19,7 @@ type EncodeRequest struct {
 	ImageBase64 string `json:"image_base64"`
 	Message     string `json:"message"`
 	RoomID      string `json:"room_id"`
+	Passphrase  string `json:"passphrase,omitempty"`
 }
 
 // EncodeImage returns an HTTP handler that accepts a base64 image + message,
@@ -49,6 +50,7 @@ func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 			}
 			req.ImageBase64 = base64.StdEncoding.EncodeToString(imgBytes)
 			req.Message = r.FormValue("message")
+			req.Passphrase = r.FormValue("passphrase")
 			req.RoomID = r.FormValue("room_id")
 		} else if contentType == "application/json" || strings.Contains(contentType, "application/json") {
 			dec := json.NewDecoder(r.Body)
@@ -119,6 +121,13 @@ func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 		if err := mw.WriteField("message", req.Message); err != nil {
 			http.Error(w, "Failed to write message field: "+err.Error(), http.StatusInternalServerError)
 			return
+		}
+		// optional passphrase (forward to AI service if provided)
+		if req.Passphrase != "" {
+			if err := mw.WriteField("passphrase", req.Passphrase); err != nil {
+				http.Error(w, "Failed to write passphrase field: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		mw.Close()
 
