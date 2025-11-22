@@ -318,7 +318,7 @@ SOFTWARE.
 | Contributor | Role | GitHub | Contributions |
 |------------|------|--------|---------------|
 | **Kanishka Bhardwaj** | Creator & Developer | [@kanishkabhardwaj12](https://github.com/kanishkabhardwaj12) | Project architecture, backend development, AI service implementation |
-| **Janvi** | Core Developer | Local Development |
+| **Janvi** | Core Developer Local Development |
 [@janviii09](https://github.com/janviii09) | Frontend enhancements, UI/UX improvements, feature implementations, bug fixes |
 
 </div>
