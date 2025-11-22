@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from 'react-router-dom';
 import {
   Lock,
   User,
@@ -12,7 +13,10 @@ import {
   Loader2,
   Image as ImageIcon,
   Key,
+  Trash2,
 } from 'lucide-react';
+import axios from 'axios';
+import StegoAnalysis from './StegoAnalysis';
 
 // Base URL for your Go backend's HTTP API and WebSocket API.
 // These can be configured via Vite env vars (recommended) or fall back to localhost:8082.
@@ -145,42 +149,51 @@ const useAuth = () => {
  * A simple API helper to make authenticated requests
  */
 const apiFetch = async (endpoint, token, options = {}) => {
-  const headers = new Headers(options.headers || {});
-  headers.set('Authorization', `Bearer ${token}`);
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    ...(options.headers || {})
+  };
   
-  if (options.body && !(options.body instanceof FormData) && !(options.body instanceof Blob)) {
-    headers.set('Content-Type', 'application/json');
+  // Set Content-Type for JSON payloads (axios will handle FormData automatically)
+  if (options.body && !(options.body instanceof FormData) && typeof options.body === 'object') {
+    headers['Content-Type'] = 'application/json';
   }
 
-  const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-    ...options,
+  const config = {
+    url: `${API_BASE_URL}${endpoint}`,
+    method: options.method || 'GET',
     headers,
-  });
+    data: options.body,
+    validateStatus: null, // Don't throw on any status
+  };
 
-  if (!response.ok) {
-    const errorBody = await response.text();
+  const response = await axios(config);
+
+  if (response.status < 200 || response.status >= 300) {
+    const errorBody = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
     throw new Error(errorBody || 'API request failed');
   }
   
-  // Handle empty responses
-  const contentType = response.headers.get("content-type");
-  if (contentType && contentType.indexOf("application/json") !== -1) {
-    return response.json();
-  } else {
-    return response.text();
-  }
+  return response.data;
 };
 
 // --- Main App Component ---
 
 export default function App() {
   const { token, username, userId, login, logout } = useAuth();
-  
+
   if (!token) {
     return <AuthPage onLogin={login} />;
   }
 
-  return <ChatPage token={token} username={username} userId={userId} onLogout={logout} />;
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<ChatPage token={token} username={username} userId={userId} onLogout={logout} />} />
+        <Route path="/analysis" element={<StegoAnalysis onBack={() => window.history.back()} />} />
+      </Routes>
+    </Router>
+  );
 }
 
 // --- Authentication Page ---
@@ -200,33 +213,26 @@ function AuthPage({ onLogin }) {
     const endpoint = isLogin ? '/login' : '/register';
     
     try {
-      const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password }),
+      const response = await axios.post(`${API_BASE_URL}${endpoint}`, {
+        username,
+        password
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || (typeof data === 'string' ? data : 'An error occurred'));
-      }
+      const data = response.data;
 
       if (isLogin) {
         onLogin(data.token);
       } else {
         // Automatically log in after successful registration
-        const loginResponse = await fetch(`${API_BASE_URL}/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password }),
+        const loginResponse = await axios.post(`${API_BASE_URL}/login`, {
+          username,
+          password
         });
-        const loginData = await loginResponse.json();
-        if (!loginResponse.ok) throw new Error('Failed to log in after registration');
-        onLogin(loginData.token);
+        onLogin(loginResponse.data.token);
       }
     } catch (err) {
-      setError(err.message);
+      const errorMsg = err.response?.data?.error || err.response?.data || err.message || 'An error occurred';
+      setError(errorMsg);
     } finally {
       setIsLoading(false);
     }
@@ -311,14 +317,33 @@ function AuthPage({ onLogin }) {
 // --- Main Chat Application Page ---
 
 function ChatPage({ token, username, userId, onLogout }) {
+  const navigate = useNavigate();
   const [rooms, setRooms] = useState([]);
-  const [currentRoom, setCurrentRoom] = useState(null);
+  const [currentRoom, setCurrentRoom] = useState(() => {
+    const saved = localStorage.getItem('pixel-current-room');
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  // Persist currentRoom to localStorage
+  useEffect(() => {
+    if (currentRoom) {
+      localStorage.setItem('pixel-current-room', JSON.stringify(currentRoom));
+    } else {
+      localStorage.removeItem('pixel-current-room');
+    }
+  }, [currentRoom]);
+
+  const handleAnalysis = () => {
+    navigate('/analysis');
+  };
+
   const [messages, setMessages] = useState([]);
   const [webSocket, setWebSocket] = useState(null);
   const [error, setError] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [wsStatus, setWsStatus] = useState('disconnected'); // 'connecting' | 'connected' | 'disconnected'
   const reconnectRef = useRef({ attempts: 0, timeoutId: null });
+  const messagesLoadedRef = useRef(false); // Track if messages have been loaded for current room
   
   // Fetch rooms on load
   const fetchRooms = useCallback(async () => {
@@ -334,11 +359,100 @@ function ChatPage({ token, username, userId, onLogout }) {
     fetchRooms();
   }, [fetchRooms]);
 
+  // Fetch and load persisted messages for the current room from the backend database
+  // This is the single source of truth for message history
+  const fetchRoomMessages = useCallback(async (roomId) => {
+    try {
+      const msgs = await apiFetch(`/rooms/${roomId}/messages`, token);
+      if (Array.isArray(msgs) && msgs.length > 0) {
+        // Reconstruct message objects from persisted data
+        const reconstructed = await Promise.all(
+          msgs.map(async (m) => {
+            let objectUrl = null;
+            let imageId = null;
+            let originalObjectUrl = null;
+            let originalImageId = null;
+            
+            // Process encoded image
+            if (m.encoded_image_base64) {
+              try {
+                const blob = base64ToBlob(m.encoded_image_base64, 'image/png');
+                imageId = await saveImageBlob(blob).catch(() => null);
+                objectUrl = URL.createObjectURL(blob);
+              } catch (e) {
+                console.warn('Failed to reconstruct encoded image from base64', e);
+              }
+            }
+            
+            // Process original image (if present)
+            if (m.original_image_base64) {
+              try {
+                const originalBlob = base64ToBlob(m.original_image_base64, 'image/png');
+                originalImageId = await saveImageBlob(originalBlob).catch(() => null);
+                originalObjectUrl = URL.createObjectURL(originalBlob);
+              } catch (e) {
+                console.warn('Failed to reconstruct original image from base64', e);
+              }
+            }
+            
+            return {
+              id: m.id || Date.now() + Math.random(),
+              type: 'decoded',
+              imageUrl: objectUrl,
+              imageId: imageId,
+              originalImageUrl: originalObjectUrl,
+              originalImageId: originalImageId,
+              text: m.decoded_text || '',
+              sender: m.sender_id || 'Unknown', // Keep sender_id for comparison
+              senderId: m.sender_id, // Store UUID separately
+              timestamp: m.created_at || new Date().toISOString(),
+              pending: false,
+            };
+          })
+        );
+        setMessages(reconstructed);
+      } else {
+        setMessages([]);
+      }
+    } catch (err) {
+      console.warn('Failed to fetch room messages:', err);
+      setMessages([]);
+    }
+  }, [token]);
+
+  // Delete message function
+  const deleteMessage = useCallback(async (messageId) => {
+    if (!currentRoom) return;
+    
+    try {
+      await apiFetch(`/rooms/${currentRoom.id}/messages/${messageId}`, token, {
+        method: 'DELETE'
+      });
+      
+      // Remove from local state
+      setMessages((prev) => prev.filter((m) => m.id !== messageId));
+      
+      // Broadcast deletion via WebSocket
+      if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+        webSocket.send(JSON.stringify({
+          type: 'delete',
+          messageId: messageId
+        }));
+      }
+    } catch (err) {
+      console.error('Failed to delete message:', err);
+      alert('Failed to delete message: ' + err.message);
+    }
+  }, [currentRoom, token, webSocket]);
+
   // Handle WebSocket connection
   useEffect(() => {
     if (!currentRoom || !token) {
       return;
     }
+    
+    // Reset messages loaded flag when switching rooms
+    messagesLoadedRef.current = false;
 
     // CRITICAL: See the note at the top of this file.
     // We pass the token as a query parameter because WebSockets can't send auth headers.
@@ -351,7 +465,11 @@ function ChatPage({ token, username, userId, onLogout }) {
       setWsStatus('connecting');
       ws = new WebSocket(wsUrl);
       setWebSocket(ws);
-      setMessages([]); // Clear messages when joining a new room
+      // Fetch persisted messages when joining a room (only once per room)
+      if (!messagesLoadedRef.current) {
+        fetchRoomMessages(currentRoom.id);
+        messagesLoadedRef.current = true;
+      }
 
       ws.onopen = () => {
         console.log(`WebSocket connected to room: ${currentRoom.id}`);
@@ -389,6 +507,13 @@ function ChatPage({ token, username, userId, onLogout }) {
         if (typeof event.data === 'string') {
           try {
             const payload = JSON.parse(event.data);
+            
+            // Handle delete message event
+            if (payload && payload.type === 'delete') {
+              setMessages((prev) => prev.filter((m) => m.id !== payload.messageId));
+              return;
+            }
+            
             if (payload && payload.type === 'image' && payload.image_base64) {
               // Convert base64 -> Blob, persist in IndexedDB, and display object URL
               (async () => {
@@ -397,19 +522,46 @@ function ChatPage({ token, username, userId, onLogout }) {
                   const blob = base64ToBlob(b64, 'image/png');
                   const imageId = await saveImageBlob(blob).catch(() => null);
                   const objectUrl = blob ? URL.createObjectURL(blob) : null;
+                  
+                  // Also process original image if present
+                  let originalObjectUrl = null;
+                  let originalImageId = null;
+                  if (payload.original_image_base64) {
+                    try {
+                      const originalBlob = base64ToBlob(payload.original_image_base64, 'image/png');
+                      originalImageId = await saveImageBlob(originalBlob).catch(() => null);
+                      originalObjectUrl = originalBlob ? URL.createObjectURL(originalBlob) : null;
+                    } catch (e) {
+                      console.warn('Failed to process original image', e);
+                    }
+                  }
+                  
                   const decodedText = payload.decoded_text || '';
+                  const messageId = payload.message_id || `${Date.now()}_${Math.random()}`; // Fallback to temp ID
+                  
                   setMessages((prev) => {
-                    // Remove any optimistic pending message that matches this image (match by base64 if present)
+                    // Remove any optimistic pending message that matches this image base64
                     const filtered = prev.filter((m) => !(m.pending && m.imageBase64 === b64));
+                    
+                    // Also check if this exact message already exists (prevent duplicates by message_id)
+                    const alreadyExists = filtered.some((m) => m.id === messageId);
+                    
+                    if (alreadyExists) {
+                      return filtered; // Don't add duplicate
+                    }
+                    
                     return [
                       ...filtered,
                       {
-                        id: Date.now(),
+                        id: messageId, // Use the UUID from backend
                         type: 'decoded',
                         imageUrl: objectUrl,
                         imageId: imageId || null,
+                        originalImageUrl: originalObjectUrl,
+                        originalImageId: originalImageId || null,
                         text: decodedText,
                         sender: payload.sender_name || payload.sender_id || 'Unknown',
+                        senderId: payload.sender_id, // Store sender UUID
                         timestamp: payload.timestamp || new Date().toISOString(),
                         pending: false,
                       },
@@ -526,107 +678,8 @@ function ChatPage({ token, username, userId, onLogout }) {
   // Persist messages per-room in localStorage so refreshes don't lose chat history.
   const storageKeyFor = (roomId) => `pm_room_${roomId}_messages`;
 
-  // Load cached messages when joining a room
-  useEffect(() => {
-    if (!currentRoom) {
-      setMessages([]);
-      return;
-    }
-    try {
-      const key = storageKeyFor(currentRoom.id);
-      const raw = localStorage.getItem(key);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          // If messages include imageId entries, resolve them from IndexedDB
-          (async () => {
-            try {
-              const resolved = [];
-              for (const m of parsed) {
-                const copy = { ...m };
-                // If there's an imageId, load the blob and create an object URL
-                if (copy.imageId) {
-                  try {
-                    const blob = await getImageBlob(copy.imageId).catch(() => null);
-                    if (blob) {
-                      copy.imageUrl = URL.createObjectURL(blob);
-                    } else if (copy.imageUrl && typeof copy.imageUrl === 'string') {
-                      // leave thumbnail if present
-                    } else {
-                      copy.imageUrl = null;
-                    }
-                  } catch (e) {
-                    copy.imageUrl = copy.imageUrl || null;
-                  }
-                }
-                // Normalize blob: urls (older cache)
-                if (copy && copy.imageUrl && typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:')) {
-                  copy.imageUrl = null;
-                }
-                resolved.push(copy);
-              }
-              setMessages(resolved);
-            } catch (e) {
-              console.warn('Failed to resolve cached images', e);
-              setMessages(parsed);
-            }
-          })();
-          return;
-        }
-      }
-    } catch (e) {
-      console.warn('Failed to load cached messages', e);
-    }
-    // If nothing cached, start with empty messages and rely on live events
-    setMessages([]);
-  }, [currentRoom]);
-
-  // Save messages to localStorage whenever they change
-  useEffect(() => {
-    if (!currentRoom) return;
-    try {
-      const key = storageKeyFor(currentRoom.id);
-      // We'll asynchronously create small thumbnails for large data URLs
-      // to avoid hitting localStorage quota while keeping a representative image.
-      (async () => {
-        const sanitized = [];
-        for (const m of messages) {
-          try {
-            const copy = { ...m };
-            if (copy.imageBase64) delete copy.imageBase64;
-
-            // If we already persisted the full image in IndexedDB, keep only the imageId
-            if (copy.imageId) {
-              // Remove transient object URLs before persisting
-              if (copy.imageUrl && typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:')) {
-                delete copy.imageUrl;
-              }
-            } else {
-              // If imageUrl is a large data URL, attempt to make a small thumbnail
-              if (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('data:') && copy.imageUrl.length > 100000) {
-                const thumb = await createThumbnail(copy.imageUrl, 200);
-                copy.imageUrl = thumb || null;
-              }
-              // Normalize object URLs and empty strings to null to avoid rendering issues
-              if (copy.imageUrl === '' || (typeof copy.imageUrl === 'string' && copy.imageUrl.startsWith('blob:'))) copy.imageUrl = null;
-            }
-
-            sanitized.push(copy);
-          } catch (e) {
-            // skip problematic entries
-          }
-        }
-
-        try {
-          localStorage.setItem(key, JSON.stringify(sanitized));
-        } catch (e) {
-          console.warn('Failed to save cached messages', e);
-        }
-      })();
-    } catch (e) {
-      console.warn('Failed to save cached messages', e);
-    }
-  }, [messages, currentRoom]);
+  // Messages are now loaded from the database via fetchRoomMessages when WebSocket connects
+  // Database is the single source of truth - no localStorage caching needed
 
 
   // Helper: create a small PNG thumbnail (data URL) from a large data URL image.
@@ -691,13 +744,18 @@ function ChatPage({ token, username, userId, onLogout }) {
 
   const handleSendMessage = (text) => {
     if (webSocket && webSocket.readyState === WebSocket.OPEN) {
+      // Add pending text message for the sender
+      const pendingMessage = {
+        id: 'pending-' + Date.now(),
+        type: 'text',
+        text: text,
+        sender: username,
+        timestamp: new Date().toISOString(),
+        pending: true,
+      };
+      setMessages((prev) => [...prev, pendingMessage]);
       // Send the raw text. The backend will handle encoding.
       webSocket.send(text);
-      // Do not add a plain-text 'self' message here. The backend now broadcasts
-      // the encoded image (and the sender will receive it too). We rely on the
-      // incoming WebSocket message to render the encoded image + decoded text
-      // so the sender and receivers see the exact same thing.
-      
     } else {
       setError('WebSocket is not connected.');
     }
@@ -723,7 +781,12 @@ function ChatPage({ token, username, userId, onLogout }) {
         <div className="flex flex-col flex-1">
           {currentRoom ? (
             <>
-              <MessageArea messages={messages} username={username} />
+              <div className="p-4 bg-gray-800 border-b border-gray-700 flex justify-end">
+                <button onClick={handleAnalysis} className="px-4 py-2 bg-indigo-600 rounded hover:bg-indigo-700 text-white">
+                  Steganalysis
+                </button>
+              </div>
+              <MessageArea messages={messages} username={username} userId={userId} onDeleteMessage={deleteMessage} />
               <MessageInput onSend={handleSendMessage} />
             </>
           ) : (
@@ -773,6 +836,7 @@ function ChatPage({ token, username, userId, onLogout }) {
 // --- Chat Sub-Components ---
 
 function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, onInvite, onLogout, wsStatus, setMessages }) {
+  const navigate = useNavigate();
   const [newRoomName, setNewRoomName] = useState('');
   const [inviteUsername, setInviteUsername] = useState('');
 
@@ -816,9 +880,11 @@ function RoomList({ rooms, currentRoom, username, onSelectRoom, onCreateRoom, on
           </div>
           <span className="ml-3 font-semibold text-lg">{username}</span>
         </div>
-        <button onClick={onLogout} title="Logout" className="p-2 rounded-lg text-gray-400 hover:bg-gray-700 hover:text-gray-100">
-          <LogOut className="h-5 w-5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={onLogout} title="Logout" className="p-2 rounded-lg text-gray-400 hover:bg-gray-700 hover:text-gray-100">
+            <LogOut className="h-5 w-5" />
+          </button>
+        </div>
       </div>
 
       {/* Room Creation */}
@@ -932,6 +998,7 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
             type: 'decoded',
             imageUrl: objectUrl,
             imageId: imageId || null,
+            imageBase64: encoded, // Store base64 for duplicate detection
             text: data.decoded_message || message.trim(),
             sender: username || 'You',
             timestamp: new Date().toISOString(),
@@ -945,6 +1012,7 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
             id: 'pending-' + Date.now(),
             type: 'decoded',
             imageUrl: dataUrl,
+            imageBase64: encoded, // Store base64 for duplicate detection
             text: data.decoded_message || message.trim(),
             sender: username || 'You',
             timestamp: new Date().toISOString(),
@@ -984,7 +1052,7 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
   );
 }
 
-function MessageArea({ messages, username }) {
+function MessageArea({ messages, username, userId, onDeleteMessage }) {
   const messagesEndRef = useRef(null);
 
   // Auto-scroll to bottom when new messages arrive
@@ -997,18 +1065,60 @@ function MessageArea({ messages, username }) {
       case 'decoded':
         {
           const displaySender = msg.sender ? (msg.sender === username ? 'You' : msg.sender) : 'Unknown';
+          // Check if message is from current user using userId (UUID comparison)
+          const isOwnMessage = msg.senderId === userId || msg.sender === username || displaySender === 'You';
           return (
-            <div className="msg-bubble other p-3 rounded-lg max-w-lg">
-                  {msg.imageUrl ? (
-                    <img
-                      src={msg.imageUrl}
-                      alt="Hidden message"
-                      className="max-w-xs rounded-md mb-2 cursor-pointer"
-                      onClick={() => window.open(msg.imageUrl, '_blank')}
-                    />
+            <div className={`msg-bubble other p-3 rounded-lg max-w-2xl ${msg.pending ? 'opacity-70' : ''} relative group`}>
+                  {/* Delete button - only show for own messages */}
+                  {isOwnMessage && !msg.pending && onDeleteMessage && (
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Are you sure you want to delete this message?')) {
+                          onDeleteMessage(msg.id);
+                        }
+                      }}
+                      className="absolute top-2 right-2 p-1.5 bg-red-600 rounded-md hover:bg-red-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Delete message"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
+                  
+                  {/* Show both original and encoded images side by side */}
+                  {(msg.originalImageUrl || msg.imageUrl) ? (
+                    <div className="mb-2 grid grid-cols-2 gap-3">
+                      {msg.originalImageUrl && (
+                        <div>
+                          <img
+                            src={msg.originalImageUrl}
+                            alt="Original image"
+                            className="w-full rounded-md cursor-pointer border-2 border-green-500"
+                            onClick={() => window.open(msg.originalImageUrl, '_blank')}
+                          />
+                          <p className="text-xs text-gray-400 mt-1 text-center">📷 Original Image</p>
+                        </div>
+                      )}
+                      {msg.imageUrl && (
+                        <div>
+                          <img
+                            src={msg.imageUrl}
+                            alt="Encoded image"
+                            className="w-full rounded-md cursor-pointer border-2 border-indigo-500"
+                            onClick={() => window.open(msg.imageUrl, '_blank')}
+                          />
+                          <p className="text-xs text-gray-400 mt-1 text-center">🔒 Encoded Image</p>
+                        </div>
+                      )}
+                    </div>
                   ) : null}
-              <p className="text-lg">{msg.text}  • Decoded from image • </p>
-              <div className="msg-meta">{displaySender} {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</div>
+              <div className="bg-gray-700 p-2 rounded mt-2">
+                <p className="text-xs text-gray-400 mb-1">📝 Decoded Message:</p>
+                <p className="text-lg font-medium">{msg.text}</p>
+              </div>
+              <div className="msg-meta mt-2">
+                {displaySender} • {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}
+                {msg.pending && <span className="ml-2 text-yellow-400">⏳ Sending...</span>}
+              </div>
             </div>
           );
         }

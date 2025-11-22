@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"log"
 
 	"github.com/gorilla/websocket"
@@ -34,10 +35,21 @@ func (c *Client) ReadPump() {
 			log.Printf("message read error: %v", err)
 			break
 		}
+		
+		// Try to parse as JSON to detect message type
+		var jsonMsg map[string]interface{}
+		msgType := "text" // default
+		if err := json.Unmarshal(message, &jsonMsg); err == nil {
+			if t, ok := jsonMsg["type"].(string); ok {
+				msgType = t
+			}
+		}
+		
 		c.Hub.Broadcast <- &BroadcastMessage{
-			RoomID:  c.RoomID,
-			UserID:  c.UserID,
-			Message: message,
+			RoomID:      c.RoomID,
+			UserID:      c.UserID,
+			Message:     message,
+			MessageType: msgType,
 		}
 	}
 }

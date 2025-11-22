@@ -158,3 +158,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+# --- Documentation ---
+# Ignore all markdown files except README.md
+*.md
+!README.md
+*.ps1

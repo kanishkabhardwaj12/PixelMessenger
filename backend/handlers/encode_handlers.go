@@ -10,8 +10,13 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"log"
+	"time"
 
+	"github.com/google/uuid"
 	ws "github.com/kanishkabhardwaj12/PixelMessenger/backend/websocket"
+	"github.com/kanishkabhardwaj12/PixelMessenger/backend/models"
+	"github.com/kanishkabhardwaj12/PixelMessenger/backend/storage"
 )
 
 // EncodeRequest is the JSON body accepted by /encode
@@ -168,8 +173,30 @@ func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 			return
 		}
 
-		// Broadcast to hub with decoded text from AI
-		hub.PublishEncodedImage(req.RoomID, encodedBytes, r.Context().Value("userID").(string), aiResp.DecodedMessage)
+		// Persist message to DB (so clients can rehydrate later)
+		senderID := ""
+		if v := r.Context().Value("userID"); v != nil {
+			senderID = v.(string)
+		}
+		// create message record
+		msg := models.Message{
+			ID:                  uuid.New().String(),
+			RoomID:              req.RoomID,
+			SenderID:            senderID,
+			DecodedText:         aiResp.DecodedMessage,
+			EncodedImageBase64:  aiResp.EncodedImageBase64,
+			OriginalImageBase64: req.ImageBase64, // Store original image
+			CreatedAt:           time.Now().UTC(),
+		}
+		if err := storage.SaveMessage(msg); err != nil {
+			// log error but continue broadcasting
+			// (don't fail the request just because DB save failed)
+			// Use the standard log package to avoid importing fmt here
+			log.Println("Failed to save message to DB:", err)
+		}
+
+		// Broadcast to hub with decoded text from AI and original image, including message ID
+		hub.PublishEncodedImage(req.RoomID, msg.ID, encodedBytes, senderID, aiResp.DecodedMessage, imgBytes)
 
 		// Return AI response to caller
 		w.Header().Set("Content-Type", "application/json")

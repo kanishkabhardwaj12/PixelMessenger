@@ -4,6 +4,9 @@ import (
 	"log"
 	"net/http"
 	"os" // Import the 'os' package
+	"path/filepath"
+	"bufio"
+	"strings"
 
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/handlers"
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/middleware"
@@ -11,7 +14,38 @@ import (
 	ws "github.com/kanishkabhardwaj12/PixelMessenger/backend/websocket"
 )
 
+// loadEnv loads environment variables from .env file
+func loadEnv() {
+	envPath := filepath.Join(".", ".env")
+	file, err := os.Open(envPath)
+	if err != nil {
+		log.Println("No .env file found, using system environment variables")
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			value := strings.TrimSpace(parts[1])
+			// Remove quotes if present
+			value = strings.Trim(value, "'\"")
+			os.Setenv(key, value)
+		}
+	}
+	log.Println("Environment variables loaded from .env file")
+}
+
 func main() {
+	// Load environment variables from .env file
+	loadEnv()
+
 	// --- 1. Initialize Database ---
 	connString := os.Getenv("DATABASE_URL")
 	if connString == "" {
@@ -48,7 +82,7 @@ func main() {
 	// Room management routes
 	router.Handle("/rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.CreateRoom)))
 	router.Handle("/my-rooms", middleware.JwtMiddleware(http.HandlerFunc(handlers.GetUserRooms)))
-	router.Handle("/rooms/", middleware.JwtMiddleware(http.HandlerFunc(handlers.InviteToRoom))) // Catches /rooms/{id}/invite
+	router.Handle("/rooms/", middleware.JwtMiddleware(http.HandlerFunc(handlers.RoomSubHandler))) // Catches /rooms/{id}/invite and /rooms/{id}/messages
 
 	// Decode route
 	router.Handle("/decode", middleware.JwtMiddleware(http.HandlerFunc(handlers.DecodeImage)))
@@ -56,6 +90,9 @@ func main() {
 	// Encode (custom image) route - accepts base64 image + message and broadcasts the
 	// resulting encoded PNG into the room. We pass the hub so the handler can publish.
 	router.Handle("/encode", middleware.JwtMiddleware(handlers.EncodeImage(hub)))
+
+	// Steganography Analysis route - compares cover and stego images
+	router.HandleFunc("/analyze-stego", handlers.AnalyzeSteganography)
 
 	// --- 5. Start Server ---
 	// Read desired port from BACKEND_PORT env var (fallback to 8082)

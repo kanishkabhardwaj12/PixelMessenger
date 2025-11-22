@@ -41,37 +41,339 @@
   color: #888;
 }
 
-/* App-specific small polish */
+/* === Enhanced UI Styles === */
+
+/* Smooth scrollbar for better UX */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1a1a;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4f46e5;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #6366f1;
+}
+
+/* App-specific polish with gradients and animations */
 .pm-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  padding: 1rem 1.5rem;
+  background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+  border-bottom: 2px solid #4f46e5;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
+
 .pm-title {
   font-weight: 700;
-  color: #8b5cf6; /* indigo-500 */
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-size: 1.5rem;
+  letter-spacing: -0.025em;
 }
+
 .pm-connection {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.25rem 0.5rem;
+  padding: 0.375rem 0.875rem;
   border-radius: 9999px;
   font-size: 0.875rem;
+  font-weight: 500;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
 }
-.pm-connection.connected { background: #10b981; color: white; }
-.pm-connection.connecting { background: #f59e0b; color: white; }
-.pm-connection.disconnected { background: #ef4444; color: white; }
 
-/* Message bubbles fallback styles when Tailwind utilities aren't present */
-.msg-bubble { border-radius: 10px; padding: 0.75rem 1rem; max-width: 70%; }
-.msg-bubble.self { background: #4f46e5; color: white; margin-left: auto; }
-.msg-bubble.other { background: #1f2937; color: #e5e7eb; }
-.msg-meta { font-size: 0.75rem; color: #9ca3af; margin-top: 0.25rem; }
+.pm-connection.connected { 
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+  animation: pulse-green 2s infinite;
+}
 
-/* Fallback centering for the auth page when Tailwind isn't available */
-.auth-wrapper { display: flex; align-items: center; justify-content: center; min-height: 100vh; background: #0f1724; color: #f8fafc; }
-.auth-box { width: 100%; max-width: 420px; padding: 2rem; background: #111827; border-radius: 12px; box-shadow: 0 10px 30px rgba(2,6,23,0.6); }
-.auth-box h2 { margin-bottom: 0.25rem; }
-.auth-box form input { width: 100%; }
+.pm-connection.connecting { 
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: white;
+  animation: pulse-orange 1s infinite;
+}
+
+.pm-connection.disconnected { 
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+  color: white;
+}
+
+@keyframes pulse-green {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+@keyframes pulse-orange {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* Enhanced message bubbles with better shadows and hover effects */
+.msg-bubble { 
+  border-radius: 16px;
+  padding: 1rem 1.25rem;
+  max-width: 70%;
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+  animation: slideIn 0.3s ease-out;
+}
+
+.msg-bubble:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+}
+
+.msg-bubble.self { 
+  background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+  color: white;
+  margin-left: auto;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 4px 6px rgba(79, 70, 229, 0.3);
+}
+
+.msg-bubble.other { 
+  background: linear-gradient(135deg, #1f2937 0%, #374151 100%);
+  color: #e5e7eb;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.msg-meta { 
+  font-size: 0.75rem;
+  color: #9ca3af;
+  margin-top: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Enhanced auth page with glassmorphism */
+.auth-wrapper { 
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
+  color: #f8fafc;
+  position: relative;
+  overflow: hidden;
+}
+
+.auth-wrapper::before {
+  content: '';
+  position: absolute;
+  width: 500px;
+  height: 500px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+  top: -100px;
+  right: -100px;
+  border-radius: 50%;
+  animation: float 6s ease-in-out infinite;
+}
+
+.auth-wrapper::after {
+  content: '';
+  position: absolute;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.1) 0%, transparent 70%);
+  bottom: -50px;
+  left: -50px;
+  border-radius: 50%;
+  animation: float 8s ease-in-out infinite reverse;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-20px); }
+}
+
+.auth-box { 
+  width: 100%;
+  max-width: 440px;
+  padding: 2.5rem;
+  background: rgba(17, 24, 39, 0.8);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  z-index: 1;
+  animation: fadeInUp 0.6s ease-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.auth-box h2 { 
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.auth-box form input { 
+  width: 100%;
+  transition: all 0.3s ease;
+}
+
+.auth-box form input:focus {
+  transform: scale(1.02);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.3);
+}
+
+/* Enhanced buttons with better hover effects */
+button {
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+button::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  transform: translate(-50%, -50%);
+  transition: width 0.6s, height 0.6s;
+}
+
+button:hover::before {
+  width: 300px;
+  height: 300px;
+}
+
+/* Enhanced image displays */
+img {
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+img:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* Loading spinner animation */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Drawer/Sidebar enhancement */
+.drawer-overlay {
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  transition: opacity 0.3s ease;
+}
+
+.drawer-content {
+  background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+  box-shadow: -4px 0 20px rgba(0, 0, 0, 0.5);
+  transition: transform 0.3s ease;
+}
+
+/* Room list items hover effect */
+.room-item {
+  transition: all 0.2s ease;
+  border-left: 3px solid transparent;
+}
+
+.room-item:hover {
+  background: rgba(99, 102, 241, 0.1);
+  border-left-color: #6366f1;
+  transform: translateX(4px);
+}
+
+.room-item.active {
+  background: rgba(99, 102, 241, 0.2);
+  border-left-color: #6366f1;
+}
+
+/* Enhanced input fields */
+input[type="text"],
+input[type="password"],
+input[type="file"],
+textarea {
+  transition: all 0.3s ease;
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+/* Delete button enhancement */
+button[title="Delete message"] {
+  backdrop-filter: blur(8px);
+  transition: all 0.2s ease;
+}
+
+button[title="Delete message"]:hover {
+  transform: scale(1.1);
+  box-shadow: 0 4px 8px rgba(220, 38, 38, 0.4);
+}
+
+/* Tooltip styles */
+[title] {
+  position: relative;
+}
+
+/* Badge and tag enhancements */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

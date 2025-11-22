@@ -51,8 +51,9 @@ def analyze_image_from_url(url):
 @app.route("/select-image", methods=["POST"])
 def select_image():
         """
-        Receives a JSON body with a list of image URLs.
+        Receives a JSON body with a list of image URLs and optional message.
         Returns the URL of the "best" image.
+        Uses message content to add variety to selection.
         """
         data = request.get_json()
         if not data or "image_urls" not in data:
@@ -62,19 +63,51 @@ def select_image():
         if not image_urls:
             return jsonify({"error": "'image_urls' list is empty"}), 400
 
-        best_image = None
-        best_score = -1
+        message = data.get("message", "")
+        
+        # If message is provided, use it to add variety to selection
+        if message:
+            # Hash the message to get a deterministic but varied selection
+            msg_hash = hashlib.sha256(message.encode('utf-8')).digest()
+            # Use first 8 bytes as seed for random selection
+            seed = int.from_bytes(msg_hash[:8], 'little')
+            rng = random.Random(seed)
+            
+            # Shuffle URLs based on message content
+            shuffled_urls = image_urls.copy()
+            rng.shuffle(shuffled_urls)
+            
+            # Take top 5 candidates for analysis
+            candidate_urls = shuffled_urls[:min(5, len(shuffled_urls))]
+            
+            best_image = None
+            best_score = -1
 
-        for url in image_urls:
-            score = analyze_image_from_url(url)
-            print(f"Image: {url}, Score: {score}")
-            if score > best_score:
-                best_score = score
-                best_image = url
+            for url in candidate_urls:
+                score = analyze_image_from_url(url)
+                print(f"Image: {url}, Score: {score}, Message: '{message[:50]}'")
+                if score > best_score:
+                    best_score = score
+                    best_image = url
 
-        if best_image is None:
-            # Fallback: just return the first image if all failed
-            best_image = image_urls[0]
+            if best_image is None:
+                # Fallback: return first shuffled image
+                best_image = shuffled_urls[0]
+        else:
+            # No message provided, use original logic
+            best_image = None
+            best_score = -1
+
+            for url in image_urls:
+                score = analyze_image_from_url(url)
+                print(f"Image: {url}, Score: {score}")
+                if score > best_score:
+                    best_score = score
+                    best_image = url
+
+            if best_image is None:
+                # Fallback: just return the first image if all failed
+                best_image = image_urls[0]
 
         return jsonify({"best_image_url": best_image})
 
