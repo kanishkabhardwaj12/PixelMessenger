@@ -3,7 +3,7 @@ package ws
 import (
 	"encoding/json"
 	"log"
-	"time" // Added time package
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -63,9 +63,6 @@ func (c *Client) ReadPump() {
 			break
 		}
 
-		// 2. CRITICAL FIX: Copy the buffer.
-		// The 'message' slice from ReadMessage is valid only until the next call.
-		// Since we pass it to a concurrent worker in the Hub, we MUST copy it.
 		msgCopy := make([]byte, len(message))
 		copy(msgCopy, message)
 

@@ -1,11 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"log"
 	"net/http"
-	"os" // Import the 'os' package
+	"os"
 	"path/filepath"
-	"bufio"
 	"strings"
 
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/handlers"

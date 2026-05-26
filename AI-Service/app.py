@@ -10,7 +10,7 @@ import random
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 app = Flask(__name__)
-
+#source /home/molly/myenv/bin/activate
 def analyze_image_from_url(url):
         """
         Downloads an image, analyzes it for complexity, and returns a score.

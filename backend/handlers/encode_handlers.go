@@ -5,18 +5,18 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
-	"log"
 	"time"
 
 	"github.com/google/uuid"
-	ws "github.com/kanishkabhardwaj12/PixelMessenger/backend/websocket"
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/models"
 	"github.com/kanishkabhardwaj12/PixelMessenger/backend/storage"
+	ws "github.com/kanishkabhardwaj12/PixelMessenger/backend/websocket"
 )
 
 // EncodeRequest is the JSON body accepted by /encode
@@ -29,8 +29,8 @@ type EncodeRequest struct {
 
 // EncodeImage returns an HTTP handler that accepts a base64 image + message,
 // embeds the message into the provided image and broadcasts the resulting PNG
-// to the requested room via the Hub. It also returns the encoded image and
-// decoded message in the HTTP response.
+// to the requested room via the Hub. It returns only the encoded image in the
+// HTTP response; the plaintext stays inside the stego image.
 func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Read body
@@ -183,9 +183,9 @@ func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 			ID:                  uuid.New().String(),
 			RoomID:              req.RoomID,
 			SenderID:            senderID,
-			DecodedText:         aiResp.DecodedMessage,
+			DecodedText:         "",
 			EncodedImageBase64:  aiResp.EncodedImageBase64,
-			OriginalImageBase64: req.ImageBase64, // Store original image
+			OriginalImageBase64: "",
 			CreatedAt:           time.Now().UTC(),
 		}
 		if err := storage.SaveMessage(msg); err != nil {
@@ -195,14 +195,13 @@ func EncodeImage(hub *ws.Hub) http.HandlerFunc {
 			log.Println("Failed to save message to DB:", err)
 		}
 
-		// Broadcast to hub with decoded text from AI and original image, including message ID
-		hub.PublishEncodedImage(req.RoomID, msg.ID, encodedBytes, senderID, aiResp.DecodedMessage, imgBytes)
+		// Broadcast only the edited image, including message ID.
+		hub.PublishEncodedImage(req.RoomID, msg.ID, encodedBytes, senderID)
 
 		// Return AI response to caller
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{
-			"encoded_image":  aiResp.EncodedImageBase64,
-			"decoded_message": aiResp.DecodedMessage,
+			"encoded_image": aiResp.EncodedImageBase64,
 		})
 	}
 }

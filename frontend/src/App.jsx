@@ -168,7 +168,7 @@ export default function App() {
         />
         <Route 
           path="/analysis" 
-          element={<StegoAnalysis onBack={() => window.history.back()} />} 
+          element={<StegoAnalysis token={token} onBack={() => window.history.back()} />} 
         />
       </Routes>
     </Router>
@@ -327,23 +327,17 @@ function ChatPage({ token, username, userId, onLogout }) {
         const reconstructed = await Promise.all(
           msgs.map(async (m) => {
             let objectUrl = null;
-            let originalObjectUrl = null;
             
             if (m.encoded_image_base64) {
               const blob = base64ToBlob(m.encoded_image_base64);
               if (blob) objectUrl = URL.createObjectURL(blob);
-            }
-            if (m.original_image_base64) {
-              const blob = base64ToBlob(m.original_image_base64);
-              if (blob) originalObjectUrl = URL.createObjectURL(blob);
             }
             
             return {
               id: m.id || Date.now() + Math.random(),
               type: 'decoded',
               imageUrl: objectUrl,
-              originalImageUrl: originalObjectUrl,
-              text: m.decoded_text || '',
+              text: '',
               sender: m.sender_name || 'Unknown', // Use sender_name from DB join if available
               senderId: m.sender_id,
               timestamp: m.created_at || new Date().toISOString(),
@@ -432,12 +426,6 @@ function ChatPage({ token, username, userId, onLogout }) {
             const b64 = payload.image_base64;
             const blob = base64ToBlob(b64);
             const objectUrl = blob ? URL.createObjectURL(blob) : null;
-            
-            let originalObjectUrl = null;
-            if (payload.original_image_base64) {
-              const origBlob = base64ToBlob(payload.original_image_base64);
-              if (origBlob) originalObjectUrl = URL.createObjectURL(origBlob);
-            }
 
             setMessages(prev => {
                // De-duplication
@@ -449,8 +437,7 @@ function ChatPage({ token, username, userId, onLogout }) {
                  id: payload.message_id,
                  type: 'decoded',
                  imageUrl: objectUrl,
-                 originalImageUrl: originalObjectUrl,
-                 text: payload.decoded_text,
+                 text: '',
                  sender: payload.sender_name || 'User',
                  senderId: payload.sender_id,
                  timestamp: payload.timestamp || new Date().toISOString(),
@@ -487,7 +474,7 @@ function ChatPage({ token, username, userId, onLogout }) {
       setMessages(prev => [...prev, {
         id: 'pending-' + Date.now(),
         type: 'self',
-        text: text,
+        text: '',
         sender: username,
         timestamp: new Date().toISOString(),
         pending: true
@@ -678,26 +665,17 @@ function MessageArea({ messages, username, userId, onDeleteMessage }) {
                 </button>
               )}
 
-              {/* Images Grid */}
-              {(msg.imageUrl || msg.originalImageUrl) && (
-                <div className="grid grid-cols-2 gap-2 mb-2">
-                  {msg.originalImageUrl && (
-                    <div className="cursor-pointer" onClick={() => window.open(msg.originalImageUrl)}>
-                      <img src={msg.originalImageUrl} alt="Original" className="rounded border border-green-500/50" />
-                      <div className="text-[10px] text-center mt-1 text-gray-300">Original</div>
-                    </div>
-                  )}
-                  {msg.imageUrl && (
-                    <div className="cursor-pointer" onClick={() => window.open(msg.imageUrl)}>
-                      <img src={msg.imageUrl} alt="Encoded" className="rounded border border-indigo-500/50" />
-                      <div className="text-[10px] text-center mt-1 text-gray-300">Encoded</div>
-                    </div>
-                  )}
+              {/* Stego Image */}
+              {msg.imageUrl && (
+                <div className="mb-2">
+                  <button type="button" className="block cursor-pointer" onClick={() => window.open(msg.imageUrl)}>
+                    <img src={msg.imageUrl} alt="Stego message" className="rounded border border-indigo-500/50 max-h-[360px] object-contain" />
+                  </button>
                 </div>
               )}
 
               {/* Text Content */}
-              <div className="text-sm font-medium">{msg.text}</div>
+              {msg.text && <div className="text-sm font-medium">{msg.text}</div>}
               
               <div className="text-[10px] mt-1 opacity-70 flex justify-between gap-4">
                 <span>{msg.sender}</span>
@@ -758,7 +736,7 @@ function CustomImageForm({ currentRoom, token, username, setMessages }) {
           type: 'decoded',
           imageUrl: url,
           imageBase64: res.data.encoded_image,
-          text: msg,
+          text: '',
           sender: username,
           timestamp: new Date().toISOString(),
           pending: true

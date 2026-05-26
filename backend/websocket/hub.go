@@ -5,9 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"image"
-	"image/png"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -29,13 +29,11 @@ type BroadcastMessage struct {
 // roomBroadcast is an IMAGE message from a worker to the Hub.
 // This is a new internal message type.
 type roomBroadcast struct {
-	RoomID       string
-	MessageID    string // UUID of the message in database
-	EncodedData  []byte // This is the final encoded PNG
-	OriginalData []byte // This is the original image (before encoding)
-	SenderID     string // user who triggered this broadcast (do not resend to them)
-	DecodedText  string // The decoded message extracted from the payload
-	Timestamp    string // RFC3339 timestamp
+	RoomID      string
+	MessageID   string // UUID of the message in database
+	EncodedData []byte // This is the final encoded PNG
+	SenderID    string // user who triggered this broadcast (do not resend to them)
+	Timestamp   string // RFC3339 timestamp
 }
 
 type Hub struct {
@@ -46,7 +44,7 @@ type Hub struct {
 
 	// This is the new channel. Workers send the FINAL image here.
 	roomBroadcast chan *roomBroadcast
-	
+
 	// Image cache to avoid re-downloading
 	imageCache map[string]image.Image
 	cacheMutex sync.RWMutex // Protects imageCache
@@ -58,10 +56,10 @@ func NewHub() *Hub {
 		Register:      make(chan *Client),
 		Unregister:    make(chan *Client),
 		Rooms:         make(map[string]map[*Client]bool),
-		roomBroadcast: make(chan *roomBroadcast), // Initialize the new channel
+		roomBroadcast: make(chan *roomBroadcast),    // Initialize the new channel
 		imageCache:    make(map[string]image.Image), // Initialize image cache
 	}
-	
+
 	// Pre-warm cache with first 5 images in background
 	go func() {
 		log.Println("Pre-warming image cache...")
@@ -79,22 +77,20 @@ func NewHub() *Hub {
 		}
 		log.Println("Image cache pre-warming complete")
 	}()
-	
+
 	return hub
 }
 
 // PublishEncodedImage allows external callers to submit a ready-encoded PNG
 // which the hub will broadcast into the given room. This is used by handlers
 // that accept user-uploaded images and want the hub to deliver them.
-func (h *Hub) PublishEncodedImage(roomID string, messageID string, data []byte, senderID string, decodedText string, originalData []byte) {
+func (h *Hub) PublishEncodedImage(roomID string, messageID string, data []byte, senderID string) {
 	h.roomBroadcast <- &roomBroadcast{
-		RoomID:       roomID,
-		MessageID:    messageID,
-		EncodedData:  data,
-		OriginalData: originalData,
-		SenderID:     senderID,
-		DecodedText:  decodedText,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		RoomID:      roomID,
+		MessageID:   messageID,
+		EncodedData: data,
+		SenderID:    senderID,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
@@ -110,32 +106,32 @@ var sampleImageURLs = []string{
 	"https://images.unsplash.com/photo-1506905925346-21bda4d32df4?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1441974231531-c6227db76b6e?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1426604966848-d7adac402bff?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Mountains & Sky
 	"https://images.unsplash.com/photo-1506905925346-21bda4d32df4?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1519904981063-b0cf448d479e?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Ocean & Water
 	"https://images.unsplash.com/photo-1505142468610-359e7d316be0?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1439066615861-d1af74d74000?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1507525428034-b723cf961d3e?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Flowers & Plants
 	"https://images.unsplash.com/photo-1490750967868-88aa4486c946?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1508962914676-134849a727f0?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1502082553048-f009c37129b9?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Abstract & Patterns
 	"https://images.unsplash.com/photo-1557672172-298e090bd0f1?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1579546929518-9e396f3cc809?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1558591710-4b4a1ae0f04d?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Cityscapes & Architecture
 	"https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1514565131-fce0801e5785?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1449824913935-59a10b8d2000?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
-	
+
 	// Sunset & Sunrise
 	"https://images.unsplash.com/photo-1495616811223-4d98c6e9c869?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
 	"https://images.unsplash.com/photo-1506443432602-ac2fcd6f54e0?ixlib=rb-4.0.3&q=80&fm=jpg&w=1080",
@@ -200,28 +196,36 @@ func fetchImage(url string) (image.Image, error) {
 // processSteganography is our new "worker" function.
 // It runs in its own goroutine and does all the slow work.
 func (h *Hub) processSteganography(message *BroadcastMessage) {
-	// Fast hash-based image selection (skip slow AI service call and URL download)
 	messageText := string(message.Message)
-	
-	// Use simple hash to pick an image URL
-	hash := 0
-	for _, ch := range messageText {
-		hash = (hash*31 + int(ch)) % len(sampleImageURLs)
+
+	// Try AI service selection if configured, otherwise fallback to hash
+	aiURL := os.Getenv("AI_SERVICE_URL")
+	var bestImageURL string
+	if aiURL != "" {
+		bestImageURL = getBestImageURL(aiURL, messageText)
 	}
-	if hash < 0 {
-		hash = -hash
+
+	// If AI service not configured or returned empty, use local hash fallback
+	if bestImageURL == "" {
+		hash := 0
+		for _, ch := range messageText {
+			hash = (hash*31 + int(ch)) % len(sampleImageURLs)
+		}
+		if hash < 0 {
+			hash = -hash
+		}
+		bestImageURL = sampleImageURLs[hash%len(sampleImageURLs)]
 	}
-	bestImageURL := sampleImageURLs[hash%len(sampleImageURLs)]
-	
+
 	// 2. Check cache first, then fetch if needed
 	var img image.Image
 	var err error
-	
+
 	// Try to read from cache
 	h.cacheMutex.RLock()
 	cachedImg, found := h.imageCache[bestImageURL]
 	h.cacheMutex.RUnlock()
-	
+
 	if found {
 		img = cachedImg
 		log.Printf("Using cached image for URL: %s", bestImageURL)
@@ -238,15 +242,7 @@ func (h *Hub) processSteganography(message *BroadcastMessage) {
 		log.Printf("Cached new image from URL: %s", bestImageURL)
 	}
 
-	// 3. Save the original image as PNG bytes
-	originalImageBuf := new(bytes.Buffer)
-	if err := png.Encode(originalImageBuf, img); err != nil {
-		log.Printf("Failed to encode original image as PNG: %v", err)
-		return
-	}
-	originalImageBytes := originalImageBuf.Bytes()
-
-	// 4. Encode the message into the image
+	// 3. Encode the message into the image
 	// To ensure the hidden payload is always valid UTF-8 and safe across languages,
 	// encode the message bytes as base64 ASCII before embedding and prefix with a
 	// small marker so the decoder can detect and reverse it.
@@ -258,34 +254,29 @@ func (h *Hub) processSteganography(message *BroadcastMessage) {
 		return // Don't send anything if this fails
 	}
 
-	// 5. Create message ID and save to database
-	decodedText := string(message.Message)
+	// 4. Create message ID and save only the stego image to database.
 	msgID := generateMessageID()
 	msg := models.Message{
 		ID:                  msgID,
 		RoomID:              message.RoomID,
 		SenderID:            message.UserID,
-		DecodedText:         decodedText,
+		DecodedText:         "",
 		EncodedImageBase64:  base64.StdEncoding.EncodeToString(encodedImageBuf.Bytes()),
-		OriginalImageBase64: base64.StdEncoding.EncodeToString(originalImageBytes),
+		OriginalImageBase64: "",
 		CreatedAt:           time.Now().UTC(),
 	}
 	if err := storage.SaveMessage(msg); err != nil {
 		log.Printf("Failed to save text message to DB: %v", err)
 	}
 
-	// 6. Send BOTH the original and encoded images back to the Hub's new channel
-	// We also include the decoded text and a timestamp so the hub can broadcast
-	// a JSON message containing both images (base64) and the decoded text.
+	// 5. Send only the encoded image back to the Hub's broadcast channel.
 	log.Printf("Worker: encoded image for room=%s sender=%s size=%d bytes", message.RoomID, message.UserID, encodedImageBuf.Len())
 	h.roomBroadcast <- &roomBroadcast{
-		RoomID:       message.RoomID,
-		MessageID:    msgID,
-		EncodedData:  encodedImageBuf.Bytes(),
-		OriginalData: originalImageBytes,
-		SenderID:     message.UserID,
-		DecodedText:  decodedText,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
+		RoomID:      message.RoomID,
+		MessageID:   msgID,
+		EncodedData: encodedImageBuf.Bytes(),
+		SenderID:    message.UserID,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
@@ -323,7 +314,7 @@ func (h *Hub) Run() {
 								"messageId": msgID,
 							}
 							jsonBytes, _ := json.Marshal(payload)
-							
+
 							for client := range clients {
 								select {
 								case client.Send <- &OutgoingMessage{Type: websocket.TextMessage, Data: jsonBytes}:
@@ -356,17 +347,15 @@ func (h *Hub) Run() {
 					senderName = u.Username
 				}
 
-				// Prepare a JSON payload containing BOTH original and encoded images + decoded text + metadata
+				// Prepare a JSON payload containing only the encoded image + metadata.
 				// Note: Message is already saved to database by the worker (processSteganography)
 				payload := map[string]interface{}{
-					"type":                  "image",
-					"message_id":            imageMsg.MessageID,
-					"image_base64":          base64.StdEncoding.EncodeToString(imageMsg.EncodedData),
-					"original_image_base64": base64.StdEncoding.EncodeToString(imageMsg.OriginalData),
-					"decoded_text":          imageMsg.DecodedText,
-					"sender_id":             imageMsg.SenderID,
-					"sender_name":           senderName,
-					"timestamp":             imageMsg.Timestamp,
+					"type":         "image",
+					"message_id":   imageMsg.MessageID,
+					"image_base64": base64.StdEncoding.EncodeToString(imageMsg.EncodedData),
+					"sender_id":    imageMsg.SenderID,
+					"sender_name":  senderName,
+					"timestamp":    imageMsg.Timestamp,
 				}
 				jsonBytes, _ := json.Marshal(payload)
 
@@ -374,7 +363,7 @@ func (h *Hub) Run() {
 					// Send the JSON text message to every client (including sender)
 					select {
 					case client.Send <- &OutgoingMessage{Type: websocket.TextMessage, Data: jsonBytes}:
-						log.Printf("Hub: sent image+text to user=%s in room=%s", client.UserID, imageMsg.RoomID)
+						log.Printf("Hub: sent encoded image to user=%s in room=%s", client.UserID, imageMsg.RoomID)
 					default:
 						log.Printf("Hub: send channel blocked for user=%s in room=%s; closing connection", client.UserID, imageMsg.RoomID)
 						close(client.Send)
